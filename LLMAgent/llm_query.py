@@ -6,7 +6,11 @@ from autogen_ext.models.openai import OpenAIChatCompletionClient
 from autogen_core import CancellationToken
 
 async def main():
-    model_client = OpenAIChatCompletionClient(model="gpt-4o")
+    model_client = OpenAIChatCompletionClient(
+        model="gpt-4o",
+        api_key="sk-UK10J76qxsDOfLgbl8DmUsBW2XSvkFGT6Gbgh00KKzCMXBYJ",
+        base_url="https://api.chatanywhere.tech/v1"
+    )
     assistant = AssistantAgent(
         name="assistant",
         model_client=model_client,
