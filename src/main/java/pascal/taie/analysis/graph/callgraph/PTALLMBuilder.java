@@ -2,6 +2,8 @@ package pascal.taie.analysis.graph.callgraph;
 
 import org.apache.logging.log4j.Logger;
 import pascal.taie.World;
+import pascal.taie.analysis.graph.cfg.CFG;
+import pascal.taie.analysis.graph.cfg.CFGBuilder;
 import pascal.taie.analysis.pta.PointerAnalysis;
 import pascal.taie.analysis.pta.PointerAnalysisResultImpl;
 import pascal.taie.analysis.pta.core.heap.Descriptor;
@@ -13,6 +15,8 @@ import pascal.taie.ir.exp.*;
 import pascal.taie.ir.proginfo.MemberRef;
 import pascal.taie.ir.proginfo.MethodRef;
 import pascal.taie.ir.stmt.Invoke;
+import pascal.taie.ir.stmt.Stmt;
+import pascal.taie.ir.stmt.Throw;
 import pascal.taie.language.classes.*;
 import pascal.taie.language.type.ClassType;
 import pascal.taie.language.type.Type;
@@ -151,7 +155,10 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                     if node is not valuable():
                         continue
                     # 计算该节点能覆盖的新子节点数
-                    new_children = len([child for child in graph.get_children(node) if child not in covered])
+                    new_children =
+                        len([child for child
+                                    in graph.get_children(node)
+                                    if child not in covered])
                     if new_children > max_new:
                         max_new = new_children
                         max_node = node
@@ -171,6 +178,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
             public MethodValue(JMethod method){
                 this.method = method;
                 this.callSitesNumber = method.getIR().invokes(false).count();
+                // compute call site number in methods called by this method
                 this.subMethodsCallSitesNumber = method.getIR()
                         .invokes(false)
                         .map(PTALLMBuilder.this::resolveCalleesOf).filter(Objects::nonNull)
@@ -184,12 +192,27 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                 this.subMethodsBranchNumber = method.getIR()
                         .invokes(false)
                         .map(PTALLMBuilder.this::resolveCalleesOf).filter(Objects::nonNull)
-                        .mapToDouble(callees ->
-                                callees.stream()
-                                        .mapToLong(callee ->
-                                                callee.getIR().invokes(false).count())
-                                        .average()
-                                        .orElse(0.0))
+                        .mapToDouble(callees -> callees.stream()
+                                .mapToLong(callee -> {
+                                    CFG<Stmt> cfg = callee.getIR().getResult(CFGBuilder.ID);
+                                    long cnt = 0;
+                                    for (Stmt stmt: cfg){
+                                        // consider stmt throw exceptions and not caught
+                                        // the cfg do not contain implicit exceptions
+                                        // if effective branch less than 1, do not add cnt
+                                        if (cfg.getSuccsOf(stmt)
+                                                .stream()
+                                                .filter(stmt1 ->
+                                                        !(stmt instanceof Invoke)
+                                                                && !(stmt instanceof Throw)
+                                                                || !cfg.isExit(stmt1))
+                                                .count() <= 1) continue;
+                                        cnt += 1;
+                                    }
+                                    return cnt;
+                                })
+                                .average()
+                                .orElse(0.0))
                         .sum();
             }
         }
@@ -367,15 +390,21 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                 if (isObjectMethod(methodRef)) {
                     yield Set.of();
                 }
-                Var base = ((InvokeInstanceExp)callSite.getInvokeExp()).getBase();
-                //resolve callee via pta result
-                yield ptaResult.getPointsToSet(base).stream()
-                        .map(recvObj -> {
-                            JMethod callee = CallGraphs.resolveCallee(
-                                    recvObj.getType(), callSite);
-                            return callee == null ? handleLambda(callSite) : callee;
-                        })
-                        .collect(Collectors.toSet());
+                JClass cls = methodRef.getDeclaringClass();
+                Set<JMethod> callees = resolveTable.get(cls, methodRef);
+                if (callees == null) {
+                    Var base = ((InvokeInstanceExp)callSite.getInvokeExp()).getBase();
+                    //resolve callee via pta result
+                    callees = ptaResult.getPointsToSet(base).stream()
+                            .map(recvObj -> {
+                                JMethod callee = CallGraphs.resolveCallee(
+                                        recvObj.getType(), callSite);
+                                return callee == null ? handleLambda(callSite) : callee;
+                            })
+                            .collect(Collectors.toSet());
+                    resolveTable.put(cls, methodRef, callees);
+                }
+                yield callees;
             }
             case STATIC -> {
                 JMethod callee = CallGraphs.resolveCallee(null, callSite);
@@ -385,43 +414,8 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
             case DYNAMIC -> {
                 Set<JMethod> callees = new HashSet<>();
                 if (isBSMInvoke(callSite)) {
-                    // ignore lambda functions
-                    // will be handled by further code
-                    InvokeDynamic indyBSM = (InvokeDynamic) callSite.getInvokeExp();
-                    JMethod bsm = indyBSM.getBootstrapMethodRef().resolve();
-                    callees.add(bsm);
-                    bsm.getIR()
-                            .invokes(true)
-                            .map(Invoke::getInvokeExp)
-                            .map(this::getMhVar)
-                            .filter(Objects::nonNull)
-                            .forEach(mhVar -> ptaResult.getPointsToSet(mhVar).forEach(recvObj -> {
-                                MethodHandle mh = recvObj.getAllocation()
-                                        instanceof MethodHandle methodHandle ?
-                                        methodHandle : null;
-                                if (mh != null) {
-                                    MethodRef ref = mh.getMethodRef();
-                                    switch (mh.getKind()) {
-                                        case REF_invokeVirtual -> {
-                                            // for virtual invocation, record base variable and
-                                            // add invokedynamic call edge
-                                            Var base = callSite.getInvokeExp().getArg(0);
-                                            Set<Obj> recvObjs = ptaResult.getPointsToSet(
-                                                    base);
-                                            recvObjs.forEach(recv ->{
-                                                JMethod callee =
-                                                        hierarchy.dispatch(recv.getType(), ref);
-                                                if (callee != null) {
-                                                    callees.add(callee);
-                                                }
-                                            });
-                                        }
-                                        case REF_invokeStatic ->
-                                            // for static invocation, just add invokedynamic call edge
-                                                callees.add(ref.resolve());
-                                    }
-                                }
-                            }));
+                    // lambda functions will be handled by further code
+                    callees.addAll(handleBSM(callSite));
                 }
                 else { // deal with lambda
                     callees.add(handleLambda(callSite));
@@ -431,6 +425,46 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
             default -> throw new AnalysisException(
                     "Failed to resolve call site: " + callSite);
         };
+    }
+
+    private Set<JMethod> handleBSM(Invoke callSite) {
+        Set<JMethod> callees = new HashSet<>();
+        InvokeDynamic indyBSM = (InvokeDynamic) callSite.getInvokeExp();
+        JMethod bsm = indyBSM.getBootstrapMethodRef().resolve();
+        callees.add(bsm);
+        bsm.getIR()
+                .invokes(true)
+                .map(Invoke::getInvokeExp)
+                .map(this::getMhVar)
+                .filter(Objects::nonNull)
+                .forEach(mhVar -> ptaResult.getPointsToSet(mhVar).forEach(recvObj -> {
+                    MethodHandle mh = recvObj.getAllocation()
+                            instanceof MethodHandle methodHandle ?
+                            methodHandle : null;
+                    if (mh != null) {
+                        MethodRef ref = mh.getMethodRef();
+                        switch (mh.getKind()) {
+                            case REF_invokeVirtual -> {
+                                // for virtual invocation, record base variable and
+                                // add invokedynamic call edge
+                                Var base = callSite.getInvokeExp().getArg(0);
+                                Set<Obj> recvObjs = ptaResult.getPointsToSet(
+                                        base);
+                                recvObjs.forEach(recv ->{
+                                    JMethod callee =
+                                            hierarchy.dispatch(recv.getType(), ref);
+                                    if (callee != null) {
+                                        callees.add(callee);
+                                    }
+                                });
+                            }
+                            case REF_invokeStatic ->
+                                // for static invocation, just add invokedynamic call edge
+                                    callees.add(ref.resolve());
+                        }
+                    }
+                }));
+        return callees;
     }
 
     @Nullable
