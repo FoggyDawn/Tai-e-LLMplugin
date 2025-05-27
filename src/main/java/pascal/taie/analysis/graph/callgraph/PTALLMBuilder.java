@@ -66,6 +66,10 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
      */
     private PointerAnalysisResultImpl ptaResult;
 
+    private final Integer LLMQueryLimit = 500;
+
+    private List<JMethod> LLMQueryMethods = new ArrayList<>(LLMQueryLimit);
+
     /**
      * record for the second work list, each contains method and its pre-conditions
      * @param constraints represent pre-conditions when entering method
@@ -125,10 +129,71 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
          */
         ptaResult = World.get().getResult(PointerAnalysis.ID);
         exPtaResult = new PointerAnalysisResultExImpl(ptaResult,true);
+        // algorithm to identify high value JMethods
+        LLMQueryMethods = chooseMethods();
         // first round of work list
         methodParamRange = buildRange(World.get().getMainMethod());
         // second round
         return buildCallGraph(World.get().getMainMethod());
+    }
+
+    private List<JMethod> chooseMethods() {
+        /* algorithm description
+        def select_nodes(graph, n):
+            covered = set()
+            selected = []
+            for _ in range(n):
+                max_node = None
+                max_new = 0
+                for node in graph.nodes:
+                    if node in selected:
+                        continue
+                    if node is not valuable():
+                        continue
+                    # 计算该节点能覆盖的新子节点数
+                    new_children = len([child for child in graph.get_children(node) if child not in covered])
+                    if new_children > max_new:
+                        max_new = new_children
+                        max_node = node
+                if max_node is None:
+                    break  # 无可选节点时提前终止
+                selected.append(max_node)
+                covered.update(graph.get_children(max_node))
+            return selected
+        * */
+        // struct for sort
+        class MethodValue{
+            private final JMethod method;
+            private long callSitesNumber;
+            private Double subMethodsCallSitesNumber;
+            private Double subMethodsBranchNumber;
+
+            public MethodValue(JMethod method){
+                this.method = method;
+                this.callSitesNumber = method.getIR().invokes(false).count();
+                this.subMethodsCallSitesNumber = method.getIR()
+                        .invokes(false)
+                        .map(PTALLMBuilder.this::resolveCalleesOf).filter(Objects::nonNull)
+                        .mapToDouble(callees ->
+                                callees.stream()
+                                        .mapToLong(callee ->
+                                                callee.getIR().invokes(false).count())
+                                        .average()
+                                        .orElse(0.0))
+                        .sum();
+                this.subMethodsBranchNumber = method.getIR()
+                        .invokes(false)
+                        .map(PTALLMBuilder.this::resolveCalleesOf).filter(Objects::nonNull)
+                        .mapToDouble(callees ->
+                                callees.stream()
+                                        .mapToLong(callee ->
+                                                callee.getIR().invokes(false).count())
+                                        .average()
+                                        .orElse(0.0))
+                        .sum();
+            }
+        }
+        return new ArrayList<>();
     }
 
     private Map<JMethod, List<ParamRange>> buildRange(JMethod entry) {
@@ -144,7 +209,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
         while (!workList.isEmpty()) {
             JMethod method = workList.poll();
             if (callGraph.addReachableMethod(method)) {
-                //construct llm queries for each method
+                //construct llm queries for valuable to-query method in LLMQueryMethods
                 final Map<Invoke, List<ArgRange>> queries = new HashMap<>();
                 callGraph.callSitesIn(method).forEach(invoke -> {
                     // params of invoke
@@ -252,6 +317,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
 
     private Map<Invoke, List<ArgRange>> LLMQuery(Map<Invoke, List<ArgRange>> queries) {
         // TODO: implement LLMQuery, may use MCP Java / autogen
+
         return queries;
     }
 
