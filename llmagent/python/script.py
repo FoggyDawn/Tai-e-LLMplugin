@@ -1,6 +1,11 @@
 import argparse
 import json
 
+
+def DataAnalyzer():
+    pass
+
+
 if __name__ == "__main__":
     # 接收Java传递的参数（网页6）
     parser = argparse.ArgumentParser()

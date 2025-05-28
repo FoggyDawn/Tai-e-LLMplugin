@@ -20,12 +20,14 @@ import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.ir.stmt.Throw;
 import pascal.taie.language.classes.*;
 import pascal.taie.language.type.ClassType;
+import pascal.taie.language.type.PrimitiveType;
 import pascal.taie.language.type.Type;
 import pascal.taie.util.AnalysisException;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.TwoKeyMap;
 
 import javax.annotation.Nullable;
+import javax.annotation.*;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
@@ -142,79 +144,90 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
         return buildCallGraph(World.get().getMainMethod());
     }
 
+    /**
+     * provide several methods to find out valuable methods to query with llm
+     * it will get all methods from World
+     * @return List<JMethod> list of valuable methods
+     */
     private List<JMethod> chooseMethods() {
-        /* algorithm description
-        def select_nodes(graph, n):
-            covered = set()
-            selected = []
-            for _ in range(n):
-                max_node = None
-                max_new = 0
-                for node in graph.nodes:
-                    if node in selected:
-                        continue
-                    if node is not valuable():
-                        continue
-                    # 计算该节点能覆盖的新子节点数
-                    new_children =
-                        len([child for child
-                                    in graph.get_children(node)
-                                    if child not in covered])
-                    if new_children > max_new:
-                        max_new = new_children
-                        max_node = node
-                if max_node is None:
-                    break  # 无可选节点时提前终止
-                selected.append(max_node)
-                covered.update(graph.get_children(max_node))
-            return selected
-        * */
-        // struct for sort
+
+        // struct for assessing method value
         class MethodValue{
             private final JMethod method;
-            private long callSitesNumber;
-            private double subMethodsCallSitesNumber;
-            private double subMethodsBranchNumber;
 
+            // Metrics
+            private long callSiteNumber;
+            private long primitiveArgNumber = 0;
+            private long otherArgNumber = 0;
+            private double subMethodIsAppNumber;
+            private double subMethodCallSiteNumber;
+            private double subMethodBranchNumber;
+            private double subMethodLineNumber = 0.0;
+
+            /**
+             * calculate all metrics about value of a method
+             * @param method assessed method
+             */
             public MethodValue(JMethod method){
                 this.method = method;
-                this.callSitesNumber = method.getIR().invokes(false).count();
                 // compute call site number in methods called by this method
-                this.subMethodsCallSitesNumber = method.getIR()
-                        .invokes(false)
-                        .map(PTALLMBuilder.this::resolveCalleesOf).filter(Objects::nonNull)
-                        .mapToDouble(callees ->
-                                callees.stream()
-                                        .mapToLong(callee ->
-                                                callee.getIR().invokes(false).count())
-                                        .average()
-                                        .orElse(0.0))
-                        .sum();
-                this.subMethodsBranchNumber = method.getIR()
-                        .invokes(false)
-                        .map(PTALLMBuilder.this::resolveCalleesOf).filter(Objects::nonNull)
-                        .mapToDouble(callees -> callees.stream()
-                                .mapToLong(callee -> {
-                                    CFG<Stmt> cfg = callee.getIR().getResult(CFGBuilder.ID);
-                                    long cnt = 0;
-                                    for (Stmt stmt: cfg){
-                                        // consider stmt throw exceptions and not caught
-                                        // the cfg do not contain implicit exceptions
-                                        // if effective branch less than 1, do not add cnt
-                                        if (cfg.getSuccsOf(stmt)
-                                                .stream()
-                                                .filter(stmt1 ->
-                                                        !(stmt instanceof Invoke)
-                                                                && !(stmt instanceof Throw)
-                                                                || !cfg.isExit(stmt1))
-                                                .count() <= 1) continue;
-                                        cnt += 1;
-                                    }
-                                    return cnt;
-                                })
-                                .average()
-                                .orElse(0.0))
-                        .sum();
+                this.callSiteNumber = method.getIR().invokes(false).count();
+                // the method never call, return
+                if (callSiteNumber == 0) return;
+                for (Invoke callee : method.getIR().invokes(false).toList()){
+                    this.primitiveArgNumber += callee.getInvokeExp().getArgs().stream()
+                            .filter(arg -> arg.getType() instanceof PrimitiveType).count();
+                    this.otherArgNumber += callee.getInvokeExp().getArgs().stream()
+                            .filter(arg -> !(arg.getType() instanceof PrimitiveType)).count();
+
+                    Set<JMethod> targetMethods = resolveCalleesOf(callee);
+                    // invoke cannot be resolved, cannot statistic method content related metrics
+                    if (targetMethods.isEmpty()) continue;
+                    long sumInvoke = 0;
+                    long sumBranch = 0;
+                    long sumApp = 0;
+                    long sumLine = 0;
+                    long count = targetMethods.size();
+                    for (JMethod targetMethod : targetMethods) {
+                        if (targetMethod.isApplication()) sumApp++;
+
+                        sumLine += targetMethod.getIR().stmts().count();
+
+                        long countInvoke = targetMethod.getIR().invokes(false).count();
+                        sumInvoke += countInvoke;
+
+                        CFG<Stmt> cfg = targetMethod.getIR().getResult(CFGBuilder.ID);
+                        long cnt = 0;
+                        for (Stmt stmt : cfg) {
+                            // consider stmt throw exceptions and not caught
+                            // the cfg do not contain implicit exceptions
+                            // if effective branch less than 1, do not add cnt
+                            if (cfg.getSuccsOf(stmt)
+                                    .stream()
+                                    .filter(stmt1 ->
+                                            !(stmt instanceof Invoke)
+                                                    && !(stmt instanceof Throw)
+                                                    || !cfg.isExit(stmt1))
+                                    .count() <= 1) continue;
+                            cnt += 1;
+                        }
+                        sumBranch += cnt;
+                    }
+                    this.subMethodCallSiteNumber += (double) sumInvoke / count;
+                    this.subMethodBranchNumber += (double) sumBranch / count;
+                    this.subMethodIsAppNumber += (double) sumApp / count;
+                    this.subMethodLineNumber += (double) sumLine / count;
+                }
+            }
+
+            public List<Number> getMetrics(){
+                return List.of(callSiteNumber, primitiveArgNumber, otherArgNumber,
+                        subMethodIsAppNumber, subMethodLineNumber, subMethodCallSiteNumber,
+                        subMethodBranchNumber);
+            }
+
+            public JMethod getMethod() {
+                return method;
             }
         }
 
@@ -265,7 +278,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                     // !!!!IMPORTANT!!!! this function contains analysis in pta
                     // and it might be wrong
                     Set<JMethod> callees = resolveCalleesOf(invoke);
-                    if (callees != null) {
+                    if (!callees.isEmpty()) {
                         // only analyse application methods
                         // seems only-app way may got wrong. commented filter
                         callees // .stream()
@@ -393,7 +406,6 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
     /**
      * Resolves callees of a call site via pta results.
      */
-    @Nullable
     private Set<JMethod> resolveCalleesOf(Invoke callSite) {
         CallKind kind = CallGraphs.getCallKind(callSite);
         return switch (kind) {

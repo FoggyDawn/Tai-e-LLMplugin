@@ -9,12 +9,12 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
-public class LLMBridge {
+public class PythonBridge {
     private static Process pythonProcess;
     private BlockingQueue<String> commandQueue = new LinkedBlockingQueue<>();
 
     // interactive python interface
-    public void interactivePython(String pp ) throws IOException {
+    public void interactiveLLM(String pp ) throws IOException {
         String pythonPath = pp == null ? "~/anaconda3/envs/llm-prompt-engineering/bin/python" : pp;
         ProcessBuilder pb = new ProcessBuilder(
                 pythonPath, "-u",
@@ -29,7 +29,7 @@ public class LLMBridge {
                     new InputStreamReader(pythonProcess.getInputStream()))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    handlePythonMessage(line);
+                    handleLLMMessage(line);
                 }
             } catch (IOException e) {
                 LogManager.getLogger().error("Python输出流异常", e);
@@ -55,7 +55,7 @@ public class LLMBridge {
         }).start();
     }
 
-    private void handlePythonMessage(String msg) {
+    private void handleLLMMessage(String msg) {
         // 消息解析逻辑...
         if (msg.startsWith("REQUEST_DATA")) {
             //
