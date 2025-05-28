@@ -7,7 +7,7 @@ class ZhipuMemChat(MemChat):
     def __init__(self,model= "glm-4-flash"):
         # 初始化实例属性
         try:
-            f = open("../keys/zhipu-apikey.txt", 'r')
+            f = open("../oldstuff/keys/zhipu-apikey.txt", 'r')
             apikey =f.read()
         finally:
             if f:
@@ -24,7 +24,7 @@ class ZhipuMemChat(MemChat):
         # print(response.choices[0].message.content)
         self.memory.append({"role": "assistant", "content": response.choices[0].message.content})
         return response.choices[0].message.content
-    
+
     def save_memory(self,mission):
         f = open("../record/"+mission+"/zhipu.txt",'a')
         MemChat.save_memory(self,f)
@@ -34,9 +34,9 @@ class ZhipuMemChat(MemChat):
             f.write(f"{role}: {content}\n\n")
         f.close()
 
-    
+
 if __name__ == "__main__":
-        
+
     test = ZhipuMemChat()
     print(test.prompt_entry("你好，很高兴认识你。"))
     print(test.prompt_entry("你能重复我上句话吗？"))

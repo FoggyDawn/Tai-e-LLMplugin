@@ -4,12 +4,12 @@ from dashscope import Generation
 from time import sleep
 from memchat import MemChat
 
-class LlamaMemChat(MemChat): 
+class LlamaMemChat(MemChat):
 
     def __init__(self, model= "llama3.1-8b-instruct"):
         # 初始化实例属性
         try:
-            f = open("../keys/aliyun-apikey.txt", 'r')
+            f = open("../oldstuff/keys/aliyun-apikey.txt", 'r')
             apikey = f.read()
         finally:
             if f:
@@ -42,17 +42,17 @@ class LlamaMemChat(MemChat):
             content = context["content"]
             f.write(f"{role}: {content}\n\n")
         f.close()
-            
+
 
 if __name__ == '__main__':
-    
+
     test = LlamaMemChat()
     print(test.prompt_entry("你好，很高兴认识你。"))
     print(test.prompt_entry("你能重复我上句话吗？"))
     print(test.prompt_entry("你能再重复我的上句话一次吗？"))
     test.show_memory()
 
-    
+
 
 # def call_with_messages():
 #     messages = [{'role': 'system', 'content': 'You are a helpful assistant.'},
