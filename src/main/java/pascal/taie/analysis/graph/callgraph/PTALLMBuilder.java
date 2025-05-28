@@ -172,8 +172,8 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
         class MethodValue{
             private final JMethod method;
             private long callSitesNumber;
-            private Double subMethodsCallSitesNumber;
-            private Double subMethodsBranchNumber;
+            private double subMethodsCallSitesNumber;
+            private double subMethodsBranchNumber;
 
             public MethodValue(JMethod method){
                 this.method = method;
@@ -216,11 +216,22 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                         .sum();
             }
         }
+
+        // method 1: sorting
+
+        //method 2: k-means (important)
+
+        //method 3: llm (?)
+
+
         return new ArrayList<>();
     }
 
     private Map<JMethod, List<ParamRange>> buildRange(JMethod entry) {
         logger.info("resolving param range method by method...");
+
+        // TODO: change this method. no need to visit all JMethod in here, but in chooseMethod
+        // this function only need to iteratively visit JMethods in list
 
         Map<JMethod, List<ParamRange>> paramRanges = new HashMap<>();
 
