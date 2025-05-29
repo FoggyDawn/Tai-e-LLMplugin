@@ -1,6 +1,8 @@
 package pascal.taie.analysis.graph.callgraph.llmcallgraph;
 
+import com.google.gson.GsonBuilder;
 import org.apache.logging.log4j.Logger;
+import com.google.gson.Gson;
 import pascal.taie.World;
 import pascal.taie.analysis.graph.callgraph.*;
 import pascal.taie.analysis.graph.cfg.CFG;
@@ -27,7 +29,9 @@ import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.TwoKeyMap;
 
 import javax.annotation.Nullable;
-import javax.annotation.*;
+import java.io.FileNotFoundException;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
@@ -75,7 +79,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
 
     private final Integer LLMQueryLimit = 500;
 
-    private List<JMethod> LLMQueryMethods = new ArrayList<>(LLMQueryLimit);
+    private List<JMethod> LLMQueryMethods = new ArrayList<>();
 
     /**
      * record for the second work list, each contains method and its pre-conditions
@@ -138,10 +142,12 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
         exPtaResult = new PointerAnalysisResultExImpl(ptaResult,true);
         // algorithm to identify high value JMethods
         LLMQueryMethods = chooseMethods();
-        // first round of work list
-        methodParamRange = buildRange(World.get().getMainMethod());
+        // for debug
+        return new DefaultCallGraph();
+        // first round of llm query
+//        methodParamRange = buildRange(World.get().getMainMethod());
         // second round
-        return buildCallGraph(World.get().getMainMethod());
+//        return buildCallGraph(World.get().getMainMethod());
     }
 
     /**
@@ -156,13 +162,13 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
             private final JMethod method;
 
             // Metrics
-            private long callSiteNumber;
+            private final long callSiteNumber;
             private long primitiveArgNumber = 0;
             private long otherArgNumber = 0;
-            private double subMethodIsAppNumber;
-            private double subMethodCallSiteNumber;
-            private double subMethodBranchNumber;
-            private double subMethodLineNumber = 0.0;
+            private double subMethodIsAppNumber = 0;
+            private double subMethodCallSiteNumber = 0;
+            private double subMethodBranchNumber = 0;
+            private double subMethodLineNumber = 0;
 
             /**
              * calculate all metrics about value of a method
@@ -231,14 +237,64 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
             }
         }
 
+        List<MethodValue> valueList = World.get()
+                .getClassHierarchy()
+                .allClasses()
+                .map(JClass::getDeclaredMethods)
+                .flatMap(Collection::stream)
+                .filter(m -> !m.isAbstract())
+                .map(MethodValue::new).toList();
+
+        logger.info("package method invoke app method: {} times", valueList.stream()
+                .filter(mv -> !mv.getMethod().isApplication()
+                && mv.subMethodIsAppNumber > 0).count());
+
+        List<JMethod> result = new ArrayList<>();
+
         // method 1: sorting
 
-        //method 2: k-means (important)
+        //method 2: k-means or gmm (important)
+        PythonBridge bridge = new PythonBridge();
+        // filtering meaningless function calls, generate data
+        Map<String, List<Number>> data = valueList.stream()
+                .filter(mv -> mv.callSiteNumber > 0 && mv.subMethodCallSiteNumber > 0
+                        && mv.primitiveArgNumber + mv.otherArgNumber > 0
+                        && mv.subMethodIsAppNumber > 0)
+                .collect(Collectors.toMap(mv ->
+                        mv.getMethod().getRef().toString(), MethodValue::getMetrics));
+
+        // Note: setPrettyPrinting() can be removed
+        Gson gson = new GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create();
+        String json = gson.toJson(data);
+
+        try (FileWriter writer = new FileWriter("llmagent/io/methodvalue.json")) {
+            writer.write(json);
+        } catch (FileNotFoundException e) {      // 文件路径无效
+            logger.error("文件未找到：" + "llmagent/io/methodvalue.json");
+        } catch (SecurityException e) {           // 权限不足
+            logger.error("安全限制：{}", e.getMessage());
+        } catch (IOException e) {                 // 通用IO异常
+            logger.error("写入失败：{}", String.valueOf(e.getCause()));
+        }
+
+        Map<String, JMethod> refmap = valueList.stream()
+                .filter(mv -> mv.callSiteNumber > 0 && mv.subMethodCallSiteNumber > 0
+                        && mv.primitiveArgNumber + mv.otherArgNumber > 0
+                        && mv.subMethodIsAppNumber > 0)
+                .collect(Collectors.toMap(mv ->
+                        mv.getMethod().getRef().toString(), MethodValue::getMethod));
+
+        try {
+            result = bridge.runScript("llmagent/io/methodvalue.json")
+                    .stream().map(refmap::get).toList();
+        } catch (IOException e) {
+            logger.error("python script error", e);
+        }
 
         //method 3: llm (?)
 
 
-        return new ArrayList<>();
+        return result;
     }
 
     private Map<JMethod, List<ParamRange>> buildRange(JMethod entry) {
@@ -428,7 +484,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                             .collect(Collectors.toSet());
                     resolveTable.put(cls, methodRef, callees);
                 }
-                yield callees;
+                yield callees.stream().filter(Objects::nonNull).collect(Collectors.toSet());
             }
             case STATIC -> {
                 JMethod callee = CallGraphs.resolveCallee(null, callSite);
@@ -442,9 +498,10 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                     callees.addAll(handleBSM(callSite));
                 }
                 else { // deal with lambda
-                    callees.add(handleLambda(callSite));
+                    if (handleLambda(callSite) != null)
+                        callees.add(handleLambda(callSite));
                 }
-                yield callees;
+                yield callees.stream().filter(Objects::nonNull).collect(Collectors.toSet());
             }
             default -> throw new AnalysisException(
                     "Failed to resolve call site: " + callSite);
