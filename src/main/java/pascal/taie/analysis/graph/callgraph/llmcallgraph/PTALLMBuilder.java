@@ -41,6 +41,7 @@ import pascal.taie.analysis.pta.core.heap.MockObj;
 import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.analysis.pta.toolkit.PointerAnalysisResultExImpl;
 import pascal.taie.ir.IR;
+import pascal.taie.ir.IRPrinter;
 import pascal.taie.ir.exp.InvokeDynamic;
 import pascal.taie.ir.exp.InvokeInstanceExp;
 import pascal.taie.ir.exp.MethodHandle;
@@ -69,6 +70,7 @@ import javax.annotation.Nullable;
 import java.io.FileNotFoundException;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -99,6 +101,7 @@ import static pascal.taie.language.classes.ClassNames.METHOD_HANDLE;
 public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
 
     private static final Logger logger = getLogger(PTALLMBuilder.class);
+    private PrintStream out;
 
     private ClassHierarchy hierarchy;
 
@@ -166,6 +169,8 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
 
     private Map<JMethod, List<ParamRange>> methodParamRange;
 
+    private static long branchNum = 0;
+
     @Override
     public CallGraph<Invoke, JMethod> build() {
         hierarchy = World.get().getClassHierarchy();
@@ -222,6 +227,14 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
              */
             public MethodValue(JMethod method) {
                 this.method = method;
+                CFG<Stmt> irs = method.getIR().getResult(CFGBuilder.ID);
+                // statistic of branchNum
+                if (method.isApplication()) {
+                    branchNum += irs.getNodes().stream().filter(stmt -> irs.getSuccsOf(stmt).stream().filter(stmt1 ->
+                            !(stmt instanceof Invoke) && !(stmt instanceof Throw) || !irs.isExit(stmt1)).count() > 1)
+                            .count();
+                }
+
                 // compute call site number in methods called by this method
                 this.callSiteNumber = method.getIR().invokes(false).count();
                 // the method never call, return
@@ -299,6 +312,8 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                 .filter(m -> !m.isAbstract())
                 .map(MethodValue::new).toList();
 
+        logger.info("there are {} branches in app", branchNum);
+
         logger.info("package method invoke app method: {} times", valueList.stream()
                 .filter(mv -> !mv.getMethod().isApplication()
                 && mv.subMethodIsAppNumber > 0).count());
@@ -313,9 +328,11 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
         Map<String, List<Number>> data = valueList.stream()
                 .filter(mv -> mv.callSiteNumber > 0 && mv.subMethodCallSiteNumber > 0
                         && mv.primitiveArgNumber + mv.otherArgNumber > 0
-                        && mv.subMethodIsAppNumber > 0)
+                        && mv.subMethodIsAppNumber > 0 && mv.subMethodBranchNumber > 0)
                 .collect(Collectors.toMap(mv ->
                         mv.getMethod().getRef().toString(), MethodValue::getMetrics));
+
+        logger.info("there are {} methods", data.size());
 
         // Note: setPrettyPrinting() can be removed
         Gson gson = new GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create();
@@ -334,7 +351,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
         Map<String, JMethod> refmap = valueList.stream()
                 .filter(mv -> mv.callSiteNumber > 0 && mv.subMethodCallSiteNumber > 0
                         && mv.primitiveArgNumber + mv.otherArgNumber > 0
-                        && mv.subMethodIsAppNumber > 0)
+                        && mv.subMethodIsAppNumber > 0 && mv.subMethodBranchNumber > 0)
                 .collect(Collectors.toMap(mv ->
                         mv.getMethod().getRef().toString(), MethodValue::getMethod));
 
@@ -345,8 +362,21 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
             logger.error("python script error", e);
         }
 
-        //method 3: llm (?)
+        // method 3: llm (?)
 
+        // token testing
+        long tokens = 0;
+        // output tokens
+        try {
+            out = new PrintStream("llmagent/io/ir.txt");
+        } catch (FileNotFoundException e) {
+            throw new RuntimeException("fail to open ir file ", e);
+        }
+        for (JMethod method : result) {
+            out.printf("------------ %s --------------%n", method.getRef().toString());
+            method.getIR().stmts().forEach(stmt -> out.println(IRPrinter.toString(stmt)));
+        }
+        out.close();
 
         return result;
     }

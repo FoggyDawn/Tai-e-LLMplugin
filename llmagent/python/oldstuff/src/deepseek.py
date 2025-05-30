@@ -7,7 +7,7 @@ class DeepseekMemChat(MemChat):
     def __init__(self,model = "deepseek-chat"):
         # 初始化实例属性
         try:
-            f = open("../oldstuff/keys/deepseek-apikey.txt", 'r')
+            f = open("../keys/deepseek-apikey.txt", 'r')
             apikey = f.read()
         finally:
             if f:

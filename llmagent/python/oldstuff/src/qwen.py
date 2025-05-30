@@ -8,7 +8,7 @@ class QwenMemChat(MemChat):
     def __init__(self,model= "qwen2-72b-instruct"):
         # 初始化实例属性
         try:
-            f = open("../oldstuff/keys/aliyun-apikey.txt", 'r')
+            f = open("../keys/aliyun-apikey.txt", 'r')
             apikey = f.read()
         finally:
             if f:

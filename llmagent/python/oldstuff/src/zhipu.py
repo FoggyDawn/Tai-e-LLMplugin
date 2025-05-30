@@ -7,7 +7,7 @@ class ZhipuMemChat(MemChat):
     def __init__(self,model= "glm-4-flash"):
         # 初始化实例属性
         try:
-            f = open("../oldstuff/keys/zhipu-apikey.txt", 'r')
+            f = open("../keys/zhipu-apikey.txt", 'r')
             apikey =f.read()
         finally:
             if f:

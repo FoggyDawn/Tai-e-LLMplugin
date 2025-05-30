@@ -4,10 +4,10 @@ from memchat import MemChat
 
 class GPTMemChat(MemChat):
 
-    def __init__(self,model= "gpt-4o-mini"):
+    def __init__(self,model= "gpt-4.1-mini"):
         # 初始化实例属性
         try:
-            f = open("../oldstuff/keys/openai-apikey.txt", 'r')
+            f = open("../keys/openai-apikey.txt", 'r')
             apikey =f.read()
             apikey = apikey.rstrip("\n")
         finally:

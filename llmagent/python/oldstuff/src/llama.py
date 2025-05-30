@@ -9,7 +9,7 @@ class LlamaMemChat(MemChat):
     def __init__(self, model= "llama3.1-8b-instruct"):
         # 初始化实例属性
         try:
-            f = open("../oldstuff/keys/aliyun-apikey.txt", 'r')
+            f = open("../keys/aliyun-apikey.txt", 'r')
             apikey = f.read()
         finally:
             if f:

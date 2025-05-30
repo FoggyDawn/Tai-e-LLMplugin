@@ -121,7 +121,7 @@ public class PythonBridge {
                     new TypeToken<List<String>>(){}.getType());
 
         } catch (IOException e) {
-            logger.error("error when python data back：{}", e.getMessage());;
+            logger.error("error when python data back：{}", e.getMessage());
         }
         return List.of("err");
     }
