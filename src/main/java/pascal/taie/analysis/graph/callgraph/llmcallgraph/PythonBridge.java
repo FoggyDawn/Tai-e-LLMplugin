@@ -1,3 +1,25 @@
+/*
+ * Tai-e: A Static Analysis Framework for Java
+ *
+ * Copyright (C) 2022 Tian Tan <tiantan@nju.edu.cn>
+ * Copyright (C) 2022 Yue Li <yueli@nju.edu.cn>
+ *
+ * This file is part of Tai-e.
+ *
+ * Tai-e is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License
+ * as published by the Free Software Foundation, either version 3
+ * of the License, or (at your option) any later version.
+ *
+ * Tai-e is distributed in the hope that it will be useful,but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+ * or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General
+ * Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with Tai-e. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 package pascal.taie.analysis.graph.callgraph.llmcallgraph;
 
 import com.google.gson.Gson;
@@ -5,14 +27,17 @@ import com.google.gson.reflect.TypeToken;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
 import static org.apache.logging.log4j.LogManager.getLogger;
 
@@ -24,7 +49,7 @@ public class PythonBridge {
     private BlockingQueue<String> commandQueue = new LinkedBlockingQueue<>();
 
     // interactive python interface
-    public void interactiveLLM(String pp ) throws IOException {
+    public void interactiveLLM(String pp) throws IOException {
         String pythonPath = pp == null ? "~/anaconda3/envs/llm-prompt-engineering/bin/python" : pp;
         ProcessBuilder pb = new ProcessBuilder(
                 pythonPath, "-u",

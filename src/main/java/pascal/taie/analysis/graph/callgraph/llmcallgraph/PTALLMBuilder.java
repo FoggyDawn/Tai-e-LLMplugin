@@ -1,10 +1,37 @@
+/*
+ * Tai-e: A Static Analysis Framework for Java
+ *
+ * Copyright (C) 2022 Tian Tan <tiantan@nju.edu.cn>
+ * Copyright (C) 2022 Yue Li <yueli@nju.edu.cn>
+ *
+ * This file is part of Tai-e.
+ *
+ * Tai-e is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License
+ * as published by the Free Software Foundation, either version 3
+ * of the License, or (at your option) any later version.
+ *
+ * Tai-e is distributed in the hope that it will be useful,but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+ * or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General
+ * Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with Tai-e. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 package pascal.taie.analysis.graph.callgraph.llmcallgraph;
 
 import com.google.gson.GsonBuilder;
 import org.apache.logging.log4j.Logger;
 import com.google.gson.Gson;
 import pascal.taie.World;
-import pascal.taie.analysis.graph.callgraph.*;
+import pascal.taie.analysis.graph.callgraph.CGBuilder;
+import pascal.taie.analysis.graph.callgraph.CallGraph;
+import pascal.taie.analysis.graph.callgraph.CallGraphs;
+import pascal.taie.analysis.graph.callgraph.CallKind;
+import pascal.taie.analysis.graph.callgraph.DefaultCallGraph;
+import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.graph.cfg.CFG;
 import pascal.taie.analysis.graph.cfg.CFGBuilder;
 import pascal.taie.analysis.pta.PointerAnalysis;
@@ -14,13 +41,23 @@ import pascal.taie.analysis.pta.core.heap.MockObj;
 import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.analysis.pta.toolkit.PointerAnalysisResultExImpl;
 import pascal.taie.ir.IR;
-import pascal.taie.ir.exp.*;
+import pascal.taie.ir.exp.InvokeDynamic;
+import pascal.taie.ir.exp.InvokeInstanceExp;
+import pascal.taie.ir.exp.MethodHandle;
+import pascal.taie.ir.exp.Var;
+import pascal.taie.ir.exp.InvokeExp;
 import pascal.taie.ir.proginfo.MemberRef;
 import pascal.taie.ir.proginfo.MethodRef;
 import pascal.taie.ir.stmt.Invoke;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.ir.stmt.Throw;
-import pascal.taie.language.classes.*;
+import pascal.taie.language.classes.ClassHierarchy;
+import pascal.taie.language.classes.ClassNames;
+import pascal.taie.language.classes.JClass;
+import pascal.taie.language.classes.JMethod;
+import pascal.taie.language.classes.MethodNames;
+import pascal.taie.language.classes.Signatures;
+import pascal.taie.language.classes.Subsignature;
 import pascal.taie.language.type.ClassType;
 import pascal.taie.language.type.PrimitiveType;
 import pascal.taie.language.type.Type;
@@ -32,14 +69,23 @@ import javax.annotation.Nullable;
 import java.io.FileNotFoundException;
 import java.io.FileWriter;
 import java.io.IOException;
-import java.util.*;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static java.util.Objects.requireNonNull;
-import static org.apache.logging.log4j.LogManager.*;
+import static org.apache.logging.log4j.LogManager.getLogger;
 import static pascal.taie.language.classes.ClassNames.CALL_SITE;
 import static pascal.taie.language.classes.ClassNames.METHOD_HANDLE;
 
@@ -101,19 +147,19 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
      * @param paramType param type
      * @param range constraints of a param
      */
-    private record ParamRange(String paramName, Type paramType, List<String> range){
-        public ParamRange(ParamRange a, ParamRange b){
+    private record ParamRange(String paramName, Type paramType, List<String> range) {
+        public ParamRange(ParamRange a, ParamRange b) {
             // merge two ParamRanges
-            this(a.paramName,a.paramType,Objects.equals(a.paramName, b.paramName)
+            this(a.paramName, a.paramType, Objects.equals(a.paramName, b.paramName)
                     && Objects.equals(a.paramType, b.paramType) ? Stream
                     .concat(a.range.stream(), b.range.stream())
                     .distinct()
                     .toList() : List.of("error"));
-            if(Objects.equals(this.range, List.of("error"))){
+            if (Objects.equals(this.range, List.of("error"))) {
                 logger.error("unmatched param type and name");
-                throw new AnalysisException("params unmatched: "+
-                        a.paramType.getName()+" "+a.paramName+" and "
-                        +b.paramType.getName()+" "+b.paramName);
+                throw new AnalysisException("params unmatched: " +
+                        a.paramType.getName() + " " + a.paramName + " and "
+                        + b.paramType.getName() + " " + b.paramName);
             }
         }
     }
@@ -139,7 +185,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
           AbstractResultHolder.storeResult() -> getResult()
          */
         ptaResult = World.get().getResult(PointerAnalysis.ID);
-        exPtaResult = new PointerAnalysisResultExImpl(ptaResult,true);
+        exPtaResult = new PointerAnalysisResultExImpl(ptaResult, true);
         // algorithm to identify high value JMethods
         LLMQueryMethods = chooseMethods();
         // for debug
@@ -158,7 +204,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
     private List<JMethod> chooseMethods() {
 
         // struct for assessing method value
-        class MethodValue{
+        class MethodValue {
             private final JMethod method;
 
             // Metrics
@@ -174,13 +220,15 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
              * calculate all metrics about value of a method
              * @param method assessed method
              */
-            public MethodValue(JMethod method){
+            public MethodValue(JMethod method) {
                 this.method = method;
                 // compute call site number in methods called by this method
                 this.callSiteNumber = method.getIR().invokes(false).count();
                 // the method never call, return
-                if (callSiteNumber == 0) return;
-                for (Invoke callee : method.getIR().invokes(false).toList()){
+                if (callSiteNumber == 0) {
+                    return;
+                }
+                for (Invoke callee : method.getIR().invokes(false).toList()) {
                     this.primitiveArgNumber += callee.getInvokeExp().getArgs().stream()
                             .filter(arg -> arg.getType() instanceof PrimitiveType).count();
                     this.otherArgNumber += callee.getInvokeExp().getArgs().stream()
@@ -188,14 +236,18 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
 
                     Set<JMethod> targetMethods = resolveCalleesOf(callee);
                     // invoke cannot be resolved, cannot statistic method content related metrics
-                    if (targetMethods.isEmpty()) continue;
+                    if (targetMethods.isEmpty()) {
+                        continue;
+                    }
                     long sumInvoke = 0;
                     long sumBranch = 0;
                     long sumApp = 0;
                     long sumLine = 0;
                     long count = targetMethods.size();
                     for (JMethod targetMethod : targetMethods) {
-                        if (targetMethod.isApplication()) sumApp++;
+                        if (targetMethod.isApplication()) {
+                            sumApp++;
+                        }
 
                         sumLine += targetMethod.getIR().stmts().count();
 
@@ -214,7 +266,9 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                                             !(stmt instanceof Invoke)
                                                     && !(stmt instanceof Throw)
                                                     || !cfg.isExit(stmt1))
-                                    .count() <= 1) continue;
+                                    .count() <= 1) {
+                                continue;
+                            }
                             cnt += 1;
                         }
                         sumBranch += cnt;
@@ -226,7 +280,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                 }
             }
 
-            public List<Number> getMetrics(){
+            public List<Number> getMetrics() {
                 return List.of(callSiteNumber, primitiveArgNumber, otherArgNumber,
                         subMethodIsAppNumber, subMethodLineNumber, subMethodCallSiteNumber,
                         subMethodBranchNumber);
@@ -327,7 +381,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                 // now choose ask answers in one go
 
                 // change to get and deal with result in inter const prop?
-                final Map<Invoke, List<ArgRange>> answers = LLMQuery(queries);
+                final Map<Invoke, List<ArgRange>> answers = llmQuery(queries);
 
                 // update answers
                 answers.forEach((invoke, argRanges) -> {
@@ -345,7 +399,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                             }
                             // make sure invoke params matches with method params.
                             if (!fieldsEqual(callee.getParamTypes(),
-                                    invoke.getInvokeExp().getArgs())){
+                                    invoke.getInvokeExp().getArgs())) {
                                 logAndThrow(invoke, callee);
                             }
                             // now: invoke args -> callee params
@@ -361,18 +415,16 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                                 if (currentRanges == null) {
                                     // return new param ranges
                                     return ranges;
-                                }
-                                else{
-                                    return appendRange(callee,currentRanges,ranges);
+                                } else {
+                                    return appendRange(callee, currentRanges, ranges);
                                 }
                             });
                             callGraph.addEdge(new Edge<>(
                                     CallGraphs.getCallKind(invoke), invoke, callee));
                         });
-                    }
-                    else {
+                    } else {
                         logger.error("Failed to resolve {}, Invoke {} cannot find callee.",
-                                invoke.getInvokeExp().getMethodRef(),invoke.toString());
+                                invoke.getInvokeExp().getMethodRef(), invoke.toString());
                     }
                 });
             }
@@ -382,22 +434,22 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
 
     private void logAndThrow(JMethod callee) throws AnalysisException {
         logger.error("unmatched param number");
-        throw new AnalysisException("paramRanges unmatched."+
-                callee.getDeclaringClass().getName()+"."
-                +callee.getName());
+        throw new AnalysisException("paramRanges unmatched." +
+                callee.getDeclaringClass().getName() + "."
+                + callee.getName());
     }
 
     private void logAndThrow(Invoke invoke, JMethod callee) throws AnalysisException {
         logger.error("unmatched method");
         throw new AnalysisException(invoke + " mismatch to "
-                +callee.getDeclaringClass().getName()+"."+
-                callee.getName()+", params unmatched.");
+                + callee.getDeclaringClass().getName() + "." +
+                callee.getName() + ", params unmatched.");
 
     }
 
     private List<ParamRange> appendRange(
             JMethod callee, List<ParamRange> currentRanges, List<ParamRange> ranges) {
-        if (currentRanges.size()!=ranges.size()) {
+        if (currentRanges.size() != ranges.size()) {
             logAndThrow(callee);
         }
         // return merged param ranges
@@ -419,7 +471,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
         return !method.isApplication();
     }
 
-    private Map<Invoke, List<ArgRange>> LLMQuery(Map<Invoke, List<ArgRange>> queries) {
+    private Map<Invoke, List<ArgRange>> llmQuery(Map<Invoke, List<ArgRange>> queries) {
         // TODO: implement LLMQuery, may use MCP Java / autogen
 
         return queries;
@@ -473,7 +525,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                 JClass cls = methodRef.getDeclaringClass();
                 Set<JMethod> callees = resolveTable.get(cls, methodRef);
                 if (callees == null) {
-                    Var base = ((InvokeInstanceExp)callSite.getInvokeExp()).getBase();
+                    Var base = ((InvokeInstanceExp) callSite.getInvokeExp()).getBase();
                     //resolve callee via pta result
                     callees = ptaResult.getPointsToSet(base).stream()
                             .map(recvObj -> {
@@ -488,18 +540,21 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
             }
             case STATIC -> {
                 JMethod callee = CallGraphs.resolveCallee(null, callSite);
-                if (callee!= null) yield Set.of(callee);
-                else yield Set.of();
+                if (callee != null) {
+                    yield Set.of(callee);
+                } else {
+                    yield Set.of();
+                }
             }
             case DYNAMIC -> {
                 Set<JMethod> callees = new HashSet<>();
                 if (isBSMInvoke(callSite)) {
                     // lambda functions will be handled by further code
                     callees.addAll(handleBSM(callSite));
-                }
-                else { // deal with lambda
-                    if (handleLambda(callSite) != null)
+                } else { // deal with lambda
+                    if (handleLambda(callSite) != null) {
                         callees.add(handleLambda(callSite));
+                    }
                 }
                 yield callees.stream().filter(Objects::nonNull).collect(Collectors.toSet());
             }
@@ -531,7 +586,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                                 Var base = callSite.getInvokeExp().getArg(0);
                                 Set<Obj> recvObjs = ptaResult.getPointsToSet(
                                         base);
-                                recvObjs.forEach(recv ->{
+                                recvObjs.forEach(recv -> {
                                     JMethod callee =
                                             hierarchy.dispatch(recv.getType(), ref);
                                     if (callee != null) {
@@ -548,13 +603,14 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
         return callees;
     }
 
+    Descriptor LAMBDA_DESC = () -> "LambdaObj";
+    Descriptor LAMBDA_NEW_DESC = () -> "LambdaConstructedObj";
+
     @Nullable
     private JMethod handleLambda(Invoke callSite) {
         AtomicReference<JMethod> callee = new AtomicReference<>();
         Var base = ((InvokeInstanceExp) callSite.getInvokeExp()).getBase();
         Set<Obj> objsOfIndy = ptaResult.getPointsToSet(base);
-        Descriptor LAMBDA_DESC = () -> "LambdaObj";
-        Descriptor LAMBDA_NEW_DESC = () -> "LambdaConstructedObj";
         for (Obj obj : objsOfIndy) {
             // for each obj, try to find a callee and add into callees
             if (obj instanceof MockObj mockObj &&
@@ -641,7 +697,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                 : actualArgs.get(0);
     }
 
-    private boolean isBSMInvoke(Invoke invoke){
+    private boolean isBSMInvoke(Invoke invoke) {
         boolean isLambda;
         boolean isJava9;
         // originally from Lambda and Java9StringConcat class
@@ -657,7 +713,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
             isLambda = false;
             isJava9 = false;
         }
-        return !isLambda&&!isJava9;
+        return !isLambda && !isJava9;
     }
 
     private boolean isObjectMethod(MethodRef methodRef) {
