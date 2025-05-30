@@ -1,7 +1,12 @@
-package pascal.taie.analysis.graph.callgraph;
+package pascal.taie.analysis.graph.callgraph.llmcallgraph;
 
+import com.google.gson.GsonBuilder;
 import org.apache.logging.log4j.Logger;
+import com.google.gson.Gson;
 import pascal.taie.World;
+import pascal.taie.analysis.graph.callgraph.*;
+import pascal.taie.analysis.graph.cfg.CFG;
+import pascal.taie.analysis.graph.cfg.CFGBuilder;
 import pascal.taie.analysis.pta.PointerAnalysis;
 import pascal.taie.analysis.pta.PointerAnalysisResultImpl;
 import pascal.taie.analysis.pta.core.heap.Descriptor;
@@ -13,14 +18,20 @@ import pascal.taie.ir.exp.*;
 import pascal.taie.ir.proginfo.MemberRef;
 import pascal.taie.ir.proginfo.MethodRef;
 import pascal.taie.ir.stmt.Invoke;
+import pascal.taie.ir.stmt.Stmt;
+import pascal.taie.ir.stmt.Throw;
 import pascal.taie.language.classes.*;
 import pascal.taie.language.type.ClassType;
+import pascal.taie.language.type.PrimitiveType;
 import pascal.taie.language.type.Type;
 import pascal.taie.util.AnalysisException;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.TwoKeyMap;
 
 import javax.annotation.Nullable;
+import java.io.FileNotFoundException;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
@@ -65,6 +76,10 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
      * ptaResult.getPointsToSet(v) check object of a variable
      */
     private PointerAnalysisResultImpl ptaResult;
+
+    private final Integer LLMQueryLimit = 500;
+
+    private List<JMethod> LLMQueryMethods = new ArrayList<>();
 
     /**
      * record for the second work list, each contains method and its pre-conditions
@@ -125,14 +140,168 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
          */
         ptaResult = World.get().getResult(PointerAnalysis.ID);
         exPtaResult = new PointerAnalysisResultExImpl(ptaResult,true);
-        // first round of work list
-        methodParamRange = buildRange(World.get().getMainMethod());
+        // algorithm to identify high value JMethods
+        LLMQueryMethods = chooseMethods();
+        // for debug
+        return new DefaultCallGraph();
+        // first round of llm query
+//        methodParamRange = buildRange(World.get().getMainMethod());
         // second round
-        return buildCallGraph(World.get().getMainMethod());
+//        return buildCallGraph(World.get().getMainMethod());
+    }
+
+    /**
+     * provide several methods to find out valuable methods to query with llm
+     * it will get all methods from World
+     * @return List<JMethod> list of valuable methods
+     */
+    private List<JMethod> chooseMethods() {
+
+        // struct for assessing method value
+        class MethodValue{
+            private final JMethod method;
+
+            // Metrics
+            private final long callSiteNumber;
+            private long primitiveArgNumber = 0;
+            private long otherArgNumber = 0;
+            private double subMethodIsAppNumber = 0;
+            private double subMethodCallSiteNumber = 0;
+            private double subMethodBranchNumber = 0;
+            private double subMethodLineNumber = 0;
+
+            /**
+             * calculate all metrics about value of a method
+             * @param method assessed method
+             */
+            public MethodValue(JMethod method){
+                this.method = method;
+                // compute call site number in methods called by this method
+                this.callSiteNumber = method.getIR().invokes(false).count();
+                // the method never call, return
+                if (callSiteNumber == 0) return;
+                for (Invoke callee : method.getIR().invokes(false).toList()){
+                    this.primitiveArgNumber += callee.getInvokeExp().getArgs().stream()
+                            .filter(arg -> arg.getType() instanceof PrimitiveType).count();
+                    this.otherArgNumber += callee.getInvokeExp().getArgs().stream()
+                            .filter(arg -> !(arg.getType() instanceof PrimitiveType)).count();
+
+                    Set<JMethod> targetMethods = resolveCalleesOf(callee);
+                    // invoke cannot be resolved, cannot statistic method content related metrics
+                    if (targetMethods.isEmpty()) continue;
+                    long sumInvoke = 0;
+                    long sumBranch = 0;
+                    long sumApp = 0;
+                    long sumLine = 0;
+                    long count = targetMethods.size();
+                    for (JMethod targetMethod : targetMethods) {
+                        if (targetMethod.isApplication()) sumApp++;
+
+                        sumLine += targetMethod.getIR().stmts().count();
+
+                        long countInvoke = targetMethod.getIR().invokes(false).count();
+                        sumInvoke += countInvoke;
+
+                        CFG<Stmt> cfg = targetMethod.getIR().getResult(CFGBuilder.ID);
+                        long cnt = 0;
+                        for (Stmt stmt : cfg) {
+                            // consider stmt throw exceptions and not caught
+                            // the cfg do not contain implicit exceptions
+                            // if effective branch less than 1, do not add cnt
+                            if (cfg.getSuccsOf(stmt)
+                                    .stream()
+                                    .filter(stmt1 ->
+                                            !(stmt instanceof Invoke)
+                                                    && !(stmt instanceof Throw)
+                                                    || !cfg.isExit(stmt1))
+                                    .count() <= 1) continue;
+                            cnt += 1;
+                        }
+                        sumBranch += cnt;
+                    }
+                    this.subMethodCallSiteNumber += (double) sumInvoke / count;
+                    this.subMethodBranchNumber += (double) sumBranch / count;
+                    this.subMethodIsAppNumber += (double) sumApp / count;
+                    this.subMethodLineNumber += (double) sumLine / count;
+                }
+            }
+
+            public List<Number> getMetrics(){
+                return List.of(callSiteNumber, primitiveArgNumber, otherArgNumber,
+                        subMethodIsAppNumber, subMethodLineNumber, subMethodCallSiteNumber,
+                        subMethodBranchNumber);
+            }
+
+            public JMethod getMethod() {
+                return method;
+            }
+        }
+
+        List<MethodValue> valueList = World.get()
+                .getClassHierarchy()
+                .allClasses()
+                .map(JClass::getDeclaredMethods)
+                .flatMap(Collection::stream)
+                .filter(m -> !m.isAbstract())
+                .map(MethodValue::new).toList();
+
+        logger.info("package method invoke app method: {} times", valueList.stream()
+                .filter(mv -> !mv.getMethod().isApplication()
+                && mv.subMethodIsAppNumber > 0).count());
+
+        List<JMethod> result = new ArrayList<>();
+
+        // method 1: sorting
+
+        //method 2: k-means or gmm (important)
+        PythonBridge bridge = new PythonBridge();
+        // filtering meaningless function calls, generate data
+        Map<String, List<Number>> data = valueList.stream()
+                .filter(mv -> mv.callSiteNumber > 0 && mv.subMethodCallSiteNumber > 0
+                        && mv.primitiveArgNumber + mv.otherArgNumber > 0
+                        && mv.subMethodIsAppNumber > 0)
+                .collect(Collectors.toMap(mv ->
+                        mv.getMethod().getRef().toString(), MethodValue::getMetrics));
+
+        // Note: setPrettyPrinting() can be removed
+        Gson gson = new GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create();
+        String json = gson.toJson(data);
+
+        try (FileWriter writer = new FileWriter("llmagent/io/methodvalue.json")) {
+            writer.write(json);
+        } catch (FileNotFoundException e) {      // 文件路径无效
+            logger.error("文件未找到：" + "llmagent/io/methodvalue.json");
+        } catch (SecurityException e) {           // 权限不足
+            logger.error("安全限制：{}", e.getMessage());
+        } catch (IOException e) {                 // 通用IO异常
+            logger.error("写入失败：{}", String.valueOf(e.getCause()));
+        }
+
+        Map<String, JMethod> refmap = valueList.stream()
+                .filter(mv -> mv.callSiteNumber > 0 && mv.subMethodCallSiteNumber > 0
+                        && mv.primitiveArgNumber + mv.otherArgNumber > 0
+                        && mv.subMethodIsAppNumber > 0)
+                .collect(Collectors.toMap(mv ->
+                        mv.getMethod().getRef().toString(), MethodValue::getMethod));
+
+        try {
+            result = bridge.runScript("llmagent/io/methodvalue.json")
+                    .stream().map(refmap::get).toList();
+        } catch (IOException e) {
+            logger.error("python script error", e);
+        }
+
+        //method 3: llm (?)
+
+
+        return result;
     }
 
     private Map<JMethod, List<ParamRange>> buildRange(JMethod entry) {
         logger.info("resolving param range method by method...");
+
+        // TODO: change this method. no need to visit all JMethod in here, but in chooseMethod
+        // this function only need to iteratively visit JMethods in list
 
         Map<JMethod, List<ParamRange>> paramRanges = new HashMap<>();
 
@@ -144,7 +313,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
         while (!workList.isEmpty()) {
             JMethod method = workList.poll();
             if (callGraph.addReachableMethod(method)) {
-                //construct llm queries for each method
+                //construct llm queries for valuable to-query method in LLMQueryMethods
                 final Map<Invoke, List<ArgRange>> queries = new HashMap<>();
                 callGraph.callSitesIn(method).forEach(invoke -> {
                     // params of invoke
@@ -165,7 +334,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                     // !!!!IMPORTANT!!!! this function contains analysis in pta
                     // and it might be wrong
                     Set<JMethod> callees = resolveCalleesOf(invoke);
-                    if (callees != null) {
+                    if (!callees.isEmpty()) {
                         // only analyse application methods
                         // seems only-app way may got wrong. commented filter
                         callees // .stream()
@@ -252,6 +421,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
 
     private Map<Invoke, List<ArgRange>> LLMQuery(Map<Invoke, List<ArgRange>> queries) {
         // TODO: implement LLMQuery, may use MCP Java / autogen
+
         return queries;
     }
 
@@ -292,7 +462,6 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
     /**
      * Resolves callees of a call site via pta results.
      */
-    @Nullable
     private Set<JMethod> resolveCalleesOf(Invoke callSite) {
         CallKind kind = CallGraphs.getCallKind(callSite);
         return switch (kind) {
@@ -301,15 +470,21 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                 if (isObjectMethod(methodRef)) {
                     yield Set.of();
                 }
-                Var base = ((InvokeInstanceExp)callSite.getInvokeExp()).getBase();
-                //resolve callee via pta result
-                yield ptaResult.getPointsToSet(base).stream()
-                        .map(recvObj -> {
-                            JMethod callee = CallGraphs.resolveCallee(
-                                    recvObj.getType(), callSite);
-                            return callee == null ? handleLambda(callSite) : callee;
-                        })
-                        .collect(Collectors.toSet());
+                JClass cls = methodRef.getDeclaringClass();
+                Set<JMethod> callees = resolveTable.get(cls, methodRef);
+                if (callees == null) {
+                    Var base = ((InvokeInstanceExp)callSite.getInvokeExp()).getBase();
+                    //resolve callee via pta result
+                    callees = ptaResult.getPointsToSet(base).stream()
+                            .map(recvObj -> {
+                                JMethod callee = CallGraphs.resolveCallee(
+                                        recvObj.getType(), callSite);
+                                return callee == null ? handleLambda(callSite) : callee;
+                            })
+                            .collect(Collectors.toSet());
+                    resolveTable.put(cls, methodRef, callees);
+                }
+                yield callees.stream().filter(Objects::nonNull).collect(Collectors.toSet());
             }
             case STATIC -> {
                 JMethod callee = CallGraphs.resolveCallee(null, callSite);
@@ -319,52 +494,58 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
             case DYNAMIC -> {
                 Set<JMethod> callees = new HashSet<>();
                 if (isBSMInvoke(callSite)) {
-                    // ignore lambda functions
-                    // will be handled by further code
-                    InvokeDynamic indyBSM = (InvokeDynamic) callSite.getInvokeExp();
-                    JMethod bsm = indyBSM.getBootstrapMethodRef().resolve();
-                    callees.add(bsm);
-                    bsm.getIR()
-                            .invokes(true)
-                            .map(Invoke::getInvokeExp)
-                            .map(this::getMhVar)
-                            .filter(Objects::nonNull)
-                            .forEach(mhVar -> ptaResult.getPointsToSet(mhVar).forEach(recvObj -> {
-                                MethodHandle mh = recvObj.getAllocation()
-                                        instanceof MethodHandle methodHandle ?
-                                        methodHandle : null;
-                                if (mh != null) {
-                                    MethodRef ref = mh.getMethodRef();
-                                    switch (mh.getKind()) {
-                                        case REF_invokeVirtual -> {
-                                            // for virtual invocation, record base variable and
-                                            // add invokedynamic call edge
-                                            Var base = callSite.getInvokeExp().getArg(0);
-                                            Set<Obj> recvObjs = ptaResult.getPointsToSet(
-                                                    base);
-                                            recvObjs.forEach(recv ->{
-                                                JMethod callee =
-                                                        hierarchy.dispatch(recv.getType(), ref);
-                                                if (callee != null) {
-                                                    callees.add(callee);
-                                                }
-                                            });
-                                        }
-                                        case REF_invokeStatic ->
-                                            // for static invocation, just add invokedynamic call edge
-                                                callees.add(ref.resolve());
-                                    }
-                                }
-                            }));
+                    // lambda functions will be handled by further code
+                    callees.addAll(handleBSM(callSite));
                 }
                 else { // deal with lambda
-                    callees.add(handleLambda(callSite));
+                    if (handleLambda(callSite) != null)
+                        callees.add(handleLambda(callSite));
                 }
-                yield callees;
+                yield callees.stream().filter(Objects::nonNull).collect(Collectors.toSet());
             }
             default -> throw new AnalysisException(
                     "Failed to resolve call site: " + callSite);
         };
+    }
+
+    private Set<JMethod> handleBSM(Invoke callSite) {
+        Set<JMethod> callees = new HashSet<>();
+        InvokeDynamic indyBSM = (InvokeDynamic) callSite.getInvokeExp();
+        JMethod bsm = indyBSM.getBootstrapMethodRef().resolve();
+        callees.add(bsm);
+        bsm.getIR()
+                .invokes(true)
+                .map(Invoke::getInvokeExp)
+                .map(this::getMhVar)
+                .filter(Objects::nonNull)
+                .forEach(mhVar -> ptaResult.getPointsToSet(mhVar).forEach(recvObj -> {
+                    MethodHandle mh = recvObj.getAllocation()
+                            instanceof MethodHandle methodHandle ?
+                            methodHandle : null;
+                    if (mh != null) {
+                        MethodRef ref = mh.getMethodRef();
+                        switch (mh.getKind()) {
+                            case REF_invokeVirtual -> {
+                                // for virtual invocation, record base variable and
+                                // add invokedynamic call edge
+                                Var base = callSite.getInvokeExp().getArg(0);
+                                Set<Obj> recvObjs = ptaResult.getPointsToSet(
+                                        base);
+                                recvObjs.forEach(recv ->{
+                                    JMethod callee =
+                                            hierarchy.dispatch(recv.getType(), ref);
+                                    if (callee != null) {
+                                        callees.add(callee);
+                                    }
+                                });
+                            }
+                            case REF_invokeStatic ->
+                                // for static invocation, just add invokedynamic call edge
+                                    callees.add(ref.resolve());
+                        }
+                    }
+                }));
+        return callees;
     }
 
     @Nullable

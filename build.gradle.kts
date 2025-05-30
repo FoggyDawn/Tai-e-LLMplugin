@@ -16,6 +16,8 @@ dependencies {
     implementation("org.apache.logging.log4j:log4j-core:2.23.1")
     // Process YAML configuration files
     implementation("com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.17.2")
+    // Process data transfer
+    implementation("com.google.code.gson:gson:2.8.9")
     // Use Soot as frontend
     implementation(files("lib/sootclasses-modified.jar"))
     "org.soot-oss:soot:4.4.1".let {
