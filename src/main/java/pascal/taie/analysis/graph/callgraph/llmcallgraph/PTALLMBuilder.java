@@ -358,15 +358,13 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
         try {
             result = bridge.runScript("llmagent/io/methodvalue.json")
                     .stream().map(refmap::get).toList();
-        } catch (IOException e) {
+        } catch (IOException | InterruptedException e) {
             logger.error("python script error", e);
         }
 
         // method 3: llm (?)
 
-        // token testing
-        long tokens = 0;
-        // output tokens
+        // token testing, also tips on out stream to file and ir printer
         try {
             out = new PrintStream("llmagent/io/ir.txt");
         } catch (FileNotFoundException e) {
@@ -384,83 +382,73 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
     private Map<JMethod, List<ParamRange>> buildRange(JMethod entry) {
         logger.info("resolving param range method by method...");
 
-        // TODO: change this method. no need to visit all JMethod in here, but in chooseMethod
-        // this function only need to iteratively visit JMethods in list
-
         Map<JMethod, List<ParamRange>> paramRanges = new HashMap<>();
 
         // call graph only for recording and util functions
         DefaultCallGraph callGraph = new DefaultCallGraph();
         callGraph.addEntryMethod(entry);
-        Queue<JMethod> workList = new ArrayDeque<>();
-        workList.add(entry);
-        while (!workList.isEmpty()) {
-            JMethod method = workList.poll();
-            if (callGraph.addReachableMethod(method)) {
-                //construct llm queries for valuable to-query method in LLMQueryMethods
-                final Map<Invoke, List<ArgRange>> queries = new HashMap<>();
-                callGraph.callSitesIn(method).forEach(invoke -> {
-                    // params of invoke
-                    List<ArgRange> params = new ArrayList<>();
-                    invoke.getInvokeExp().getArgs().forEach(arg -> {
-                        ArgRange argRange = new ArgRange(arg, new ArrayList<>());
-                        params.add(argRange);
-                    });
-                    queries.put(invoke, params);
-                });
-                // now choose ask answers in one go
+        for (JMethod method : LLMQueryMethods) {
 
-                // change to get and deal with result in inter const prop?
-                final Map<Invoke, List<ArgRange>> answers = llmQuery(queries);
-
-                // update answers
-                answers.forEach((invoke, argRanges) -> {
-                    // !!!!IMPORTANT!!!! this function contains analysis in pta
-                    // and it might be wrong
-                    Set<JMethod> callees = resolveCalleesOf(invoke);
-                    if (!callees.isEmpty()) {
-                        // only analyse application methods
-                        // seems only-app way may got wrong. commented filter
-                        callees // .stream()
-                                // .filter(callee -> !isIgnored(callee))
-                                .forEach(callee -> {
-                            if (!callGraph.contains(callee)) {
-                                workList.add(callee);
-                            }
-                            // make sure invoke params matches with method params.
-                            if (!fieldsEqual(callee.getParamTypes(),
-                                    invoke.getInvokeExp().getArgs())) {
-                                logAndThrow(invoke, callee);
-                            }
-                            // now: invoke args -> callee params
-                            // ranges: the param ranges of this callee
-                            // argRange -> paramRange. Done
-                            List<Type> types = callee.getParamTypes();
-                            List<ParamRange> ranges = IntStream.range(0, callee.getParamCount())
-                                    .mapToObj(i -> new ParamRange(callee.getParamName(i),
-                                            types.get(i), argRanges.get(i).range))
-                                    .collect(Collectors.toList());
-                            // add ranges to the final result paramRanges
-                            paramRanges.compute(callee, (k, currentRanges) -> {
-                                if (currentRanges == null) {
-                                    // return new param ranges
-                                    return ranges;
-                                } else {
-                                    return appendRange(callee, currentRanges, ranges);
-                                }
-                            });
-                            callGraph.addEdge(new Edge<>(
-                                    CallGraphs.getCallKind(invoke), invoke, callee));
+            //construct llm queries for valuable to-query method in LLMQueryMethods
+            final Map<Invoke, List<ArgRange>> queries = new HashMap<>();
+            method.getIR().stmts().filter(stmt -> stmt instanceof Invoke)
+                    .map(stmt -> (Invoke) stmt).forEach(invoke -> {
+                                // params of invoke
+                        List<ArgRange> params = new ArrayList<>();
+                        invoke.getInvokeExp().getArgs().forEach(arg -> {
+                            ArgRange argRange = new ArgRange(arg, new ArrayList<>());
+                            params.add(argRange);
                         });
-                    } else {
-                        logger.error("Failed to resolve {}, Invoke {} cannot find callee.",
-                                invoke.getInvokeExp().getMethodRef(), invoke.toString());
-                    }
-                });
-            }
+                        queries.put(invoke, params);
+                    });
+            // now choose ask answers in one go for one method
+            final Map<Invoke, List<ArgRange>> answers = llmQuery(queries);
+
+            // update answers
+            answers.forEach((invoke, argRanges) -> {
+                // !!!!IMPORTANT!!!! this function contains analysis in pta
+                // and it might be wrong
+                Set<JMethod> callees = resolveCalleesOf(invoke);
+                if (!callees.isEmpty()) {
+                    // only analyse application methods
+                    // seems only-app way may got wrong. commented filter
+                    callees // .stream()
+                            // .filter(callee -> !isIgnored(callee))
+                            .forEach(callee -> {
+                        // make sure invoke params matches with method params.
+                        if (!fieldsEqual(callee.getParamTypes(),
+                                invoke.getInvokeExp().getArgs())) {
+                            logAndThrow(invoke, callee);
+                        }
+                        // now: invoke args -> callee params
+                        // ranges: the param ranges of this callee
+                        // argRange -> paramRange. Done
+                        List<Type> types = callee.getParamTypes();
+                        List<ParamRange> ranges = IntStream.range(0, callee.getParamCount())
+                                .mapToObj(i -> new ParamRange(callee.getParamName(i),
+                                        types.get(i), argRanges.get(i).range))
+                                .collect(Collectors.toList());
+                        // add ranges to the final result paramRanges
+                        paramRanges.compute(callee, (k, currentRanges) -> {
+                            if (currentRanges == null) {
+                                // return new param ranges
+                                return ranges;
+                            } else {
+                                return appendRange(callee, currentRanges, ranges);
+                            }
+                        });
+                        callGraph.addEdge(new Edge<>(
+                                CallGraphs.getCallKind(invoke), invoke, callee));
+                    });
+                } else {
+                    logger.error("Failed to resolve {}, Invoke {} cannot find callee.",
+                            invoke.getInvokeExp().getMethodRef(), invoke.toString());
+                }
+            });
         }
         return paramRanges;
     }
+
 
     private void logAndThrow(JMethod callee) throws AnalysisException {
         logger.error("unmatched param number");
@@ -509,36 +497,80 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
 
     private CallGraph<Invoke, JMethod> buildCallGraph(JMethod entry) {
         logger.info("Building Call Graph with LLM agent...");
-        DefaultCallGraph callGraph = new DefaultCallGraph();
-        callGraph.addEntryMethod(entry);
-        Queue<Entry> workList = new ArrayDeque<>();
-        Entry mainEntry = new Entry(new ArrayList<>(entry.getParamCount()), entry);
-        workList.add(mainEntry);
-        while (!workList.isEmpty()) {
-            Entry invoke = workList.poll();
-            JMethod invokeMethod = invoke.method();
-            // TODO: how to use methodParamRange
-            if (callGraph.addReachableMethod(invokeMethod)) {
-                IR ir = invokeMethod.getIR();
 
-                // TODO: checkout which invokes are not reachable with LLM / CE
-                // Step 1: find out all branches in cfg
-                // Step 2: write a interface for concolic execution and LLM(get information)
-                // Step 3: handle interface with z3 solver
-
+//        Map<JMethod, List<ParamRange>> paramRanges = new HashMap<>();
+//        // call graph only for recording and util functions
+//        DefaultCallGraph callGraph = new DefaultCallGraph();
+//        callGraph.addEntryMethod(entry);
+//        Queue<JMethod> workList = new ArrayDeque<>();
+//        workList.add(entry);
+//        while (!workList.isEmpty()) {
+//            JMethod method = workList.poll();
+//            if (callGraph.addReachableMethod(method)) {
+//                //construct llm queries for valuable to-query method in LLMQueryMethods
+//                final Map<Invoke, List<ArgRange>> queries = new HashMap<>();
 //                callGraph.callSitesIn(method).forEach(invoke -> {
-//                    Set<JMethod> callees = resolveCalleesOf(invoke);
-//                    callees.forEach(callee -> {
-//                        if (!callGraph.contains(callee)) {
-//                            workList.add(callee);
-//                        }
-//                        callGraph.addEdge(new Edge<>(
-//                                CallGraphs.getCallKind(invoke), invoke, callee));
+//                    // params of invoke
+//                    List<ArgRange> params = new ArrayList<>();
+//                    invoke.getInvokeExp().getArgs().forEach(arg -> {
+//                        ArgRange argRange = new ArgRange(arg, new ArrayList<>());
+//                        params.add(argRange);
 //                    });
+//                    queries.put(invoke, params);
 //                });
-            }
-        }
-        return callGraph;
+//                // now choose ask answers in one go
+//
+//                // change to get and deal with result in inter const prop?
+//                final Map<Invoke, List<ArgRange>> answers = llmQuery(queries);
+//
+//                // update answers
+//                answers.forEach((invoke, argRanges) -> {
+//                    // !!!!IMPORTANT!!!! this function contains analysis in pta
+//                    // and it might be wrong
+//                    Set<JMethod> callees = resolveCalleesOf(invoke);
+//                    if (!callees.isEmpty()) {
+//                        // only analyse application methods
+//                        // seems only-app way may got wrong. commented filter
+//                        callees // .stream()
+//                                // .filter(callee -> !isIgnored(callee))
+//                                .forEach(callee -> {
+//                                    if (!callGraph.contains(callee)) {
+//                                        workList.add(callee);
+//                                    }
+//                                    // make sure invoke params matches with method params.
+//                                    if (!fieldsEqual(callee.getParamTypes(),
+//                                            invoke.getInvokeExp().getArgs())) {
+//                                        logAndThrow(invoke, callee);
+//                                    }
+//                                    // now: invoke args -> callee params
+//                                    // ranges: the param ranges of this callee
+//                                    // argRange -> paramRange. Done
+//                                    List<Type> types = callee.getParamTypes();
+//                                    List<ParamRange> ranges = IntStream.range(0, callee.getParamCount())
+//                                            .mapToObj(i -> new ParamRange(callee.getParamName(i),
+//                                                    types.get(i), argRanges.get(i).range))
+//                                            .collect(Collectors.toList());
+//                                    // add ranges to the final result paramRanges
+//                                    paramRanges.compute(callee, (k, currentRanges) -> {
+//                                        if (currentRanges == null) {
+//                                            // return new param ranges
+//                                            return ranges;
+//                                        } else {
+//                                            return appendRange(callee, currentRanges, ranges);
+//                                        }
+//                                    });
+//                                    callGraph.addEdge(new Edge<>(
+//                                            CallGraphs.getCallKind(invoke), invoke, callee));
+//                                });
+//                    } else {
+//                        logger.error("Failed to resolve {}, Invoke {} cannot find callee.",
+//                                invoke.getInvokeExp().getMethodRef(), invoke.toString());
+//                    }
+//                });
+//            }
+//        }
+//        return paramRanges;
+        return new DefaultCallGraph();
     }
 
     /**

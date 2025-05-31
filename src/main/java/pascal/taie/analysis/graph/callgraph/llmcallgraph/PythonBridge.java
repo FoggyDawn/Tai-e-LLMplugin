@@ -34,10 +34,12 @@ import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static org.apache.logging.log4j.LogManager.getLogger;
 
@@ -102,7 +104,7 @@ public class PythonBridge {
         commandQueue.offer(cmd);
     }
 
-    public List<String> runScript(String inputPath) throws IOException {
+    public List<String> runScript(String inputPath) throws IOException, InterruptedException {
         ProcessBuilder pb = new ProcessBuilder(
                 "/home/byx/anaconda3/envs/llm-prompt-engineering/bin/python", "-u",
                 "llmagent/python/script.py",
@@ -111,18 +113,36 @@ public class PythonBridge {
 
         Process process = pb.start();
 
-        try {
-            // 读取文件内容
-            String jsonStr = Files.readString(Paths.get("llmagent/io/valuablemethod.json"));
-
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream()))) {
+            String jsonStr = reader.lines().collect(Collectors.joining("\n"));
             Gson gson = new Gson();
 
             return gson.fromJson(jsonStr,
                     new TypeToken<List<String>>(){}.getType());
-
-        } catch (IOException e) {
-            logger.error("error when python data back：{}", e.getMessage());
         }
-        return List.of("err");
+
+        // file method, slow but stable
+//        int exitCode = process.waitFor();
+//
+//        if (exitCode != 0) {
+//            return List.of("Python script error");
+//        }
+//
+//        try {
+//            // 读取文件内容
+//            String jsonStr = Files.readString(Paths.get("llmagent/io/valuablemethod.json"));
+//
+//            logger.info(jsonStr);
+//
+//            Gson gson = new Gson();
+//
+//            return gson.fromJson(jsonStr,
+//                    new TypeToken<List<String>>(){}.getType());
+//
+//        } catch (IOException e) {
+//            logger.error("error when python data back：{}", e.getMessage());
+//            return List.of();
+//        }
     }
 }

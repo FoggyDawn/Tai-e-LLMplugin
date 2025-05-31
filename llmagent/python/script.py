@@ -23,7 +23,7 @@ class DataAnalyzer:
         # print("input file: ", input_path)
         self.data = self.read_java_map(input_path)
         # TODO: fill in gmm process
-        return list(self.data.keys())[:50]
+        return list(self.data.keys())[:500]
 
 
 if __name__ == "__main__":
@@ -34,6 +34,7 @@ if __name__ == "__main__":
 
     # 执行核心逻辑
     result = DataAnalyzer().process(args.input)
-    # print(json.dumps(result))
-    with open("llmagent/io/valuablemethod.json", "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=4, ensure_ascii=False)
+    print(json.dumps(result))
+    # file method, slow but stable
+    # with open("llmagent/io/valuablemethod.json", "w", encoding="utf-8") as f:
+    #     json.dump(result, f, indent=4, ensure_ascii=False)
