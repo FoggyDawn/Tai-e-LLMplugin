@@ -146,7 +146,7 @@ class CHABuilder implements CGBuilder<Invoke, JMethod> {
     private Set<JMethod> resolveCalleesOf(Invoke callSite) {
         CallKind kind = CallGraphs.getCallKind(callSite);
         return switch (kind) {
-            case INTERFACE, VIRTUAL, SPECIAL -> {
+            case INTERFACE, VIRTUAL -> {
                 MethodRef methodRef = callSite.getMethodRef();
                 if (ignoreObjectMethods && isObjectMethod(methodRef)) {
                     yield Set.of();
@@ -164,7 +164,7 @@ class CHABuilder implements CGBuilder<Invoke, JMethod> {
                 }
                 yield callees.size() <= calleeLimit ? callees : Set.of();
             }
-            case STATIC -> {
+            case STATIC, SPECIAL -> {
                 JMethod callee = CallGraphs.resolveCallee(null, callSite);
                 if (callee != null) {
                     yield Set.of(callee);
