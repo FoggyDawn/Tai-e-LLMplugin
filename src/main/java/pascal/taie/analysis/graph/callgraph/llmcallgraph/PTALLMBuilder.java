@@ -40,6 +40,7 @@ import pascal.taie.analysis.pta.core.heap.Descriptor;
 import pascal.taie.analysis.pta.core.heap.MockObj;
 import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.analysis.pta.toolkit.PointerAnalysisResultExImpl;
+import pascal.taie.config.ConfigException;
 import pascal.taie.ir.IRPrinter;
 import pascal.taie.ir.exp.InvokeDynamic;
 import pascal.taie.ir.exp.InvokeInstanceExp;
@@ -129,6 +130,8 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
 
     private final boolean ignoreObjectMethods = false;
 
+    private final boolean useGMM;
+
     /**
      * record for the second work list, each contains method and its pre-conditions
      * @param constraints represent pre-conditions when entering method
@@ -169,6 +172,16 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
     private Map<JMethod, List<ParamRange>> methodParamRange;
 
     private static long branchNum = 0;
+
+    public PTALLMBuilder(String chooseMethod) {
+        switch (chooseMethod) {
+            case "gmm" -> useGMM = true;
+            case "sort" -> useGMM = false;
+            default -> {
+                useGMM = false;
+            }
+        }
+    }
 
     @Override
     public CallGraph<Invoke, JMethod> build() {
@@ -301,6 +314,12 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
             public JMethod getMethod() {
                 return method;
             }
+
+            public double getScore(){
+                return subMethodIsAppNumber
+                        * primitiveArgNumber/(primitiveArgNumber + otherArgNumber)
+                        * subMethodCallSiteNumber * subMethodBranchNumber;
+            }
         }
 
         List<MethodValue> valueList = World.get()
@@ -319,49 +338,55 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
 
         List<JMethod> result = new ArrayList<>();
 
-        // method 1: sorting
+        if (!useGMM) {
+            // method 1: sorting
+            // score: subMethodIsAppNumber
+            // * primitiveArgNumber/(primitiveArgNumber + otherArgNumber)
+            // * subMethodCallSiteNumber * subMethodBranchNumber
+            List<MethodValue> toSort = new ArrayList<>(valueList);
+            toSort.sort((mv1,mv2) -> Double.compare(mv1.getScore(), mv2.getScore()));
+            result = toSort.stream().limit(LLMQueryLimit).map(MethodValue::getMethod).toList();
+        } else {
+            //method 2: k-means or gmm (important)
+            PythonBridge bridge = new PythonBridge();
+            // filtering meaningless function calls, generate data
+            Map<String, List<Number>> data = valueList.stream()
+                    .filter(mv -> mv.callSiteNumber > 0 && mv.subMethodCallSiteNumber > 0
+                            && mv.primitiveArgNumber + mv.otherArgNumber > 0
+                            && mv.subMethodIsAppNumber > 1 && mv.subMethodBranchNumber > 0)
+                    .collect(Collectors.toMap(mv ->
+                            mv.getMethod().getRef().toString(), MethodValue::getMetrics));
 
-        //method 2: k-means or gmm (important)
-        PythonBridge bridge = new PythonBridge();
-        // filtering meaningless function calls, generate data
-        Map<String, List<Number>> data = valueList.stream()
-                .filter(mv -> mv.callSiteNumber > 0 && mv.subMethodCallSiteNumber > 0
-                        && mv.primitiveArgNumber + mv.otherArgNumber > 0
-                        && mv.subMethodIsAppNumber >= 1 && mv.subMethodBranchNumber > 0)
-                .collect(Collectors.toMap(mv ->
-                        mv.getMethod().getRef().toString(), MethodValue::getMetrics));
+            logger.info("there are {} methods", data.size());
 
-        logger.info("there are {} methods", data.size());
+            // Note: setPrettyPrinting() can be removed
+            Gson gson = new GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create();
+            String json = gson.toJson(data);
 
-        // Note: setPrettyPrinting() can be removed
-        Gson gson = new GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create();
-        String json = gson.toJson(data);
+            try (FileWriter writer = new FileWriter("llmagent/io/methodvalue.json")) {
+                writer.write(json);
+            } catch (FileNotFoundException e) {      // 文件路径无效
+                logger.error("文件未找到：" + "llmagent/io/methodvalue.json");
+            } catch (SecurityException e) {           // 权限不足
+                logger.error("安全限制：{}", e.getMessage());
+            } catch (IOException e) {                 // 通用IO异常
+                logger.error("写入失败：{}", String.valueOf(e.getCause()));
+            }
 
-        try (FileWriter writer = new FileWriter("llmagent/io/methodvalue.json")) {
-            writer.write(json);
-        } catch (FileNotFoundException e) {      // 文件路径无效
-            logger.error("文件未找到：" + "llmagent/io/methodvalue.json");
-        } catch (SecurityException e) {           // 权限不足
-            logger.error("安全限制：{}", e.getMessage());
-        } catch (IOException e) {                 // 通用IO异常
-            logger.error("写入失败：{}", String.valueOf(e.getCause()));
+            Map<String, JMethod> refmap = valueList.stream()
+                    .filter(mv -> mv.callSiteNumber > 0 && mv.subMethodCallSiteNumber > 0
+                            && mv.primitiveArgNumber + mv.otherArgNumber > 0
+                            && mv.subMethodIsAppNumber > 1 && mv.subMethodBranchNumber > 0)
+                    .collect(Collectors.toMap(mv ->
+                            mv.getMethod().getRef().toString(), MethodValue::getMethod));
+
+            try {
+                result = bridge.runScript("llmagent/io/methodvalue.json")
+                        .stream().map(refmap::get).toList();
+            } catch (IOException | InterruptedException e) {
+                logger.error("python script error", e);
+            }
         }
-
-        Map<String, JMethod> refmap = valueList.stream()
-                .filter(mv -> mv.callSiteNumber > 0 && mv.subMethodCallSiteNumber > 0
-                        && mv.primitiveArgNumber + mv.otherArgNumber > 0
-                        && mv.subMethodIsAppNumber >= 1 && mv.subMethodBranchNumber > 0)
-                .collect(Collectors.toMap(mv ->
-                        mv.getMethod().getRef().toString(), MethodValue::getMethod));
-
-        try {
-            result = bridge.runScript("llmagent/io/methodvalue.json")
-                    .stream().map(refmap::get).toList();
-        } catch (IOException | InterruptedException e) {
-            logger.error("python script error", e);
-        }
-
-        // method 3: llm (?)
 
         // token testing, also tips on out stream to file and ir printer
         try {
