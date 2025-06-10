@@ -34,6 +34,7 @@ import pascal.taie.ir.stmt.Invoke;
 import pascal.taie.language.classes.JMethod;
 
 import java.io.File;
+import java.util.Objects;
 
 public class CallGraphBuilder extends ProgramAnalysis<CallGraph<Invoke, JMethod>> {
 
@@ -48,10 +49,16 @@ public class CallGraphBuilder extends ProgramAnalysis<CallGraph<Invoke, JMethod>
     private static final String CALL_EDGES_FILE = "call-edges.txt";
 
     private final String algorithm;
+    private final String chooseMethod;
 
     public CallGraphBuilder(AnalysisConfig config) {
         super(config);
         algorithm = config.getOptions().getString("algorithm");
+        if (algorithm.equals("llm")) {
+            chooseMethod = config.getOptions().getString("choose-method");
+        } else {
+            chooseMethod = null;
+        }
     }
 
     @Override
@@ -62,7 +69,7 @@ public class CallGraphBuilder extends ProgramAnalysis<CallGraph<Invoke, JMethod>
         } else if (algorithm.startsWith("cha")) {
             builder = new CHABuilder(algorithm);
         } else if (algorithm.equals("llm")) {
-            builder = new PTALLMBuilder();
+            builder = new PTALLMBuilder(chooseMethod);
         } else {
             throw new ConfigException(
                     "Unknown call graph building algorithm: " + algorithm);

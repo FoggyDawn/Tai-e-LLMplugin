@@ -41,6 +41,8 @@
   options:
     algorithm: pta # | cha | cha=LIMIT | cha-full | llm
     # llm is this version specified
+    choose-method: sort # | gmm
+    # how to choose llm query methods, only when algorithm = llm
     dump: false # whether dump call graph in dot file
     dump-methods: false # whether dump reachable methods
     dump-call-edges: false # whether dump call edges
