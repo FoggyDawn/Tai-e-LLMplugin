@@ -71,14 +71,7 @@ import java.io.FileNotFoundException;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintStream;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -285,16 +278,17 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                             // consider stmt throw exceptions and not caught
                             // the cfg do not contain implicit exceptions
                             // if effective branch less than 1, do not add cnt
-                            if (cfg.getSuccsOf(stmt)
+                            long nbr = cfg.getSuccsOf(stmt)
                                     .stream()
                                     .filter(stmt1 ->
                                             !(stmt instanceof Invoke)
                                                     && !(stmt instanceof Throw)
                                                     || !cfg.isExit(stmt1))
-                                    .count() <= 1) {
+                                    .count();
+                            if (nbr <= 1) {
                                 continue;
                             }
-                            cnt += 1;
+                            cnt += nbr - 1;
                         }
                         sumBranch += cnt;
                     }
@@ -316,9 +310,13 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
             }
 
             public double getScore(){
-                return subMethodIsAppNumber
-                        * primitiveArgNumber/(primitiveArgNumber + otherArgNumber)
-                        * subMethodCallSiteNumber * subMethodBranchNumber;
+                if (primitiveArgNumber + otherArgNumber == 0)  {
+                    return 0;
+                } else {
+                    return subMethodIsAppNumber
+                            * primitiveArgNumber/(primitiveArgNumber + otherArgNumber)
+                            * subMethodCallSiteNumber * subMethodBranchNumber;
+                }
             }
         }
 
@@ -344,8 +342,23 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
             // * primitiveArgNumber/(primitiveArgNumber + otherArgNumber)
             // * subMethodCallSiteNumber * subMethodBranchNumber
             List<MethodValue> toSort = new ArrayList<>(valueList);
-            toSort.sort((mv1,mv2) -> Double.compare(mv1.getScore(), mv2.getScore()));
-            result = toSort.stream().limit(LLMQueryLimit).map(MethodValue::getMethod).toList();
+            toSort.sort((mv1,mv2) -> Double.compare(mv2.getScore(), mv1.getScore()));
+            result = toSort.stream().limit(LLMQueryLimit)
+                    .filter(mv -> mv.getScore() > 0).map(MethodValue::getMethod).toList();
+
+            try {
+                out = new PrintStream("llmagent/io/selectedmethods.txt");
+            } catch (FileNotFoundException e) {
+                throw new RuntimeException("fail to open result file ", e);
+            }
+            for (MethodValue mv : toSort.subList(0, Math.min(LLMQueryLimit, result.size()))) {
+                out.printf(" %s\n   ", mv.getMethod().getRef().toString());
+                out.print("Center: ");
+                mv.getMetrics().forEach(number -> out.print(number + " "));
+                out.println();
+            }
+            out.close();
+
         } else {
             //method 2: k-means or gmm (important)
             PythonBridge bridge = new PythonBridge();
@@ -408,24 +421,13 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
 
         Map<JMethod, List<ParamRange>> paramRanges = new HashMap<>();
 
-        // call graph only for recording and util functions
-        DefaultCallGraph callGraph = new DefaultCallGraph();
-        callGraph.addEntryMethod(entry);
+//        // call graph only for recording and util functions
+//        DefaultCallGraph callGraph = new DefaultCallGraph();
+//        callGraph.addEntryMethod(entry);
         for (JMethod method : LLMQueryMethods) {
 
-            //construct llm queries for valuable to-query method in LLMQueryMethods
-            final Map<Invoke, List<ArgRange>> queries = new HashMap<>();
-            method.getIR().invokes(true).forEach(invoke -> {
-                    // params of invoke
-                    List<ArgRange> params = new ArrayList<>();
-                    invoke.getInvokeExp().getArgs().forEach(arg -> {
-                        ArgRange argRange = new ArgRange(arg, new ArrayList<>());
-                        params.add(argRange);
-                    });
-                    queries.put(invoke, params);
-            });
             // now choose ask answers in one go for one method
-            final Map<Invoke, List<ArgRange>> answers = llmQuery(queries);
+            final Map<Invoke, List<ArgRange>> answers = llmQuery(method);
 
             // update answers
             answers.forEach((invoke, argRanges) -> {
@@ -459,8 +461,6 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                                 return appendRange(callee, currentRanges, ranges);
                             }
                         });
-                        callGraph.addEdge(new Edge<>(
-                                CallGraphs.getCallKind(invoke), invoke, callee));
                     });
                 }
 //                } else {
@@ -510,8 +510,24 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
         return !method.isApplication();
     }
 
-    private Map<Invoke, List<ArgRange>> llmQuery(Map<Invoke, List<ArgRange>> queries) {
-        // TODO: implement LLMQuery, may use MCP Java / autogen
+    private Map<Invoke, List<ArgRange>> llmQuery(JMethod method) {
+        // TODO: implement LLMQuery, may use autogen
+
+        //construct llm queries for valuable to-query method in LLMQueryMethods
+        final Map<Invoke, List<ArgRange>> queries = new HashMap<>();
+        method.getIR().invokes(true).forEach(invoke -> {
+            // params of invoke
+            List<ArgRange> params = new ArrayList<>();
+            invoke.getInvokeExp().getArgs().forEach(arg -> {
+                ArgRange argRange = new ArgRange(arg, new ArrayList<>());
+                params.add(argRange);
+            });
+            queries.put(invoke, params);
+        });
+
+        PythonBridge bridge = new PythonBridge();
+
+
 
         return queries;
     }

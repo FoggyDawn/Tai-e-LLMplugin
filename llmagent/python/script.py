@@ -30,11 +30,10 @@ class DataAnalyzer:
             # print("聚类标签字典:")
             # for key, label in labels_dict.items():
             #     print(f"{key}: Cluster {label}")
-
+            print("callSiteNumber, primitiveArgNumber, otherArgNumber, subMethodIsAppNumber, subMethodLineNumber, subMethodCallSiteNumber, subMethodBranchNumber")
             print("\n聚类详细信息:")
             for cluster in cluster_info:
                 print(f"Cluster {cluster['cluster_id']}:")
-                print("callSiteNumber, primitiveArgNumber, otherArgNumber, subMethodIsAppNumber, subMethodLineNumber, subMethodCallSiteNumber, subMethodBranchNumber")
 
                 # 格式化中心点（保留4位小数，极小小数归零）
                 formatted_center = []
@@ -62,8 +61,10 @@ class DataAnalyzer:
         self.print_clusters(cluster_info)
 
         # TODO: select clusters and reach limit
+        n = len(cluster_info)
         for k,v in labels_dict:
 
+            pass
 
 
         return list(self.data.keys())[:500]
