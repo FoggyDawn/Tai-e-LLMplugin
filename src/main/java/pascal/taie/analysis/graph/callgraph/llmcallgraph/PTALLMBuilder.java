@@ -126,7 +126,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
     private final boolean useGMM;
 
     /**
-     * record for the second work list, each contains method and its pre-conditions
+     * record for the second period, each contains method and its pre-conditions
      * @param constraints represent pre-conditions when entering method
      * @param method JMethod
      */
@@ -199,7 +199,7 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
         // algorithm to identify high value JMethods
         LLMQueryMethods = chooseMethods();
         // first round of llm query
-        methodParamRange = buildRange(World.get().getMainMethod());
+        methodParamRange = buildRange();
         // for debug
         return new DefaultCallGraph();
         // second round
@@ -416,14 +416,11 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
         return result;
     }
 
-    private Map<JMethod, List<ParamRange>> buildRange(JMethod entry) {
+    private Map<JMethod, List<ParamRange>> buildRange() {
         logger.info("resolving param range method by method...");
 
         Map<JMethod, List<ParamRange>> paramRanges = new HashMap<>();
 
-//        // call graph only for recording and util functions
-//        DefaultCallGraph callGraph = new DefaultCallGraph();
-//        callGraph.addEntryMethod(entry);
         for (JMethod method : LLMQueryMethods) {
 
             // now choose ask answers in one go for one method
@@ -438,10 +435,13 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
                     // only analyse application methods
                     // seems only-app way may got wrong. canceled filter
                     callees.forEach(callee -> {
+                        if (callee.getParamCount() == 0) {
+                            return;
+                        }
                         // make sure invoke params matches with method params.
                         if (!fieldsEqual(callee.getParamTypes(),
                                 invoke.getInvokeExp().getArgs())) {
-//                            logMismatch(invoke, callee);
+                            // logMismatch(invoke, callee);
                             return;
                         }
                         // now: invoke args -> callee params
@@ -511,25 +511,53 @@ public class PTALLMBuilder implements CGBuilder<Invoke, JMethod> {
     }
 
     private Map<Invoke, List<ArgRange>> llmQuery(JMethod method) {
-        // TODO: implement LLMQuery, may use autogen
+        // TODO: implement LLMQuery use autogen
+
+        record IndexRange(String argName, List<String> ranges){}
+
+        Map<Integer, List<IndexRange>> queries = new HashMap<>();
+        Map<Invoke, List<ArgRange>> answers = new HashMap<>();
 
         //construct llm queries for valuable to-query method in LLMQueryMethods
-        final Map<Invoke, List<ArgRange>> queries = new HashMap<>();
         method.getIR().invokes(true).forEach(invoke -> {
             // params of invoke
-            List<ArgRange> params = new ArrayList<>();
+            if (invoke.getInvokeExp().getArgCount() == 0) {
+                return;
+            }
+            List<IndexRange> params = new ArrayList<>();
             invoke.getInvokeExp().getArgs().forEach(arg -> {
-                ArgRange argRange = new ArgRange(arg, new ArrayList<>());
-                params.add(argRange);
+                IndexRange indRange = new IndexRange(arg.getName(), new ArrayList<>());
+                params.add(indRange);
             });
-            queries.put(invoke, params);
+            queries.put(invoke.getIndex(), params);
         });
 
         PythonBridge bridge = new PythonBridge();
 
+        // dump queries to json and pass to python
+        Gson gson = new GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create();
+        String json = gson.toJson(queries);
+//        logger.info(json);
+
+        try (FileWriter writer = new FileWriter("llmagent/io/invoke-range.json")) {
+            writer.write(json);
+        } catch (FileNotFoundException e) {      // 文件路径无效
+            logger.error("文件未找到：" + "llmagent/io/invoke-range.json");
+        } catch (SecurityException e) {           // 权限不足
+            logger.error("安全限制：{}", e.getMessage());
+        } catch (IOException e) {                 // 通用IO异常
+            logger.error("写入失败：{}", String.valueOf(e.getCause()));
+        }
+
+        StringBuilder ir = new StringBuilder();
+        ir.append(method.getRef().toString()).append("\n");
+        method.getIR().stmts().forEach(stmt -> ir.append(IRPrinter.toString(stmt)).append('\n'));
+
+        String irString = ir.toString();
 
 
-        return queries;
+
+        return answers;
     }
 
     private CallGraph<Invoke, JMethod> buildCallGraph(JMethod entry) {

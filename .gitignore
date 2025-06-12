@@ -7,5 +7,5 @@ build/
 cache/
 out/
 output/
-llmagent/python/oldstuff/keys/
+llmagent/python/mem_chat/keys/
 llmagent/io/

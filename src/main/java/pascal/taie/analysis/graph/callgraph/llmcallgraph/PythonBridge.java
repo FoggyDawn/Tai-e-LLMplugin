@@ -101,6 +101,34 @@ public class PythonBridge {
         commandQueue.offer(cmd);
     }
 
+    public void runSingleLLMQuery(String ir, String inputPath, String outputPath) throws IOException {
+        ProcessBuilder pb = new ProcessBuilder(
+                "/home/byx/anaconda3/envs/llm-prompt-engineering/bin/python", "-u",
+                "llmagent/python/script.py",
+                "--ir=" + ir,
+                "--input=" + inputPath,
+                "--output=" + outputPath
+        );
+
+        Process process = pb.start();
+
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream()))) {
+
+            BufferedReader errorReader = new BufferedReader(
+                    new InputStreamReader(process.getErrorStream()));
+            String errorLine;
+            while ((errorLine = errorReader.readLine()) != null) {
+                logger.error(errorLine); // 记录错误日志
+            }
+
+            String jsonStr = reader.lines().collect(Collectors.joining("\n"));
+            Gson gson = new Gson();
+
+
+        }
+    }
+
     public List<String> runScript(String inputPath) throws IOException, InterruptedException {
         ProcessBuilder pb = new ProcessBuilder(
                 "/home/byx/anaconda3/envs/llm-prompt-engineering/bin/python", "-u",

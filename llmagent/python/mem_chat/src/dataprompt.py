@@ -1,4 +1,4 @@
-from llama import *
+# from llama import *
 from deepseek import *
 from qwen import *
 from zhipu import *
@@ -11,7 +11,7 @@ def create_chat(model_name):
     patterns = [
         (r'^glm', ZhipuMemChat),
         (r'^gpt', GPTMemChat),
-        (r'^llama', LlamaMemChat),
+        # (r'^llama', LlamaMemChat),
         (r'^qwen', QwenMemChat),
         (r'^deepseek', DeepseekMemChat),
     ]
